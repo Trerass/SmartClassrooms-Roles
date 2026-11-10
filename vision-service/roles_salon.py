@@ -1,0 +1,703 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Lógica del taller de transfer learning, en dos etapas:
+
+    Foto ──► [1] YOLOv8 (preentrenado, detecta "persona")
+         ──► recorte por persona
+         ──► [2] EfficientNetB0 + transfer learning (estudiante / persona_aseo / persona_seguridad)
+         ──► conteo por rol + imagen anotada
+
+Flujo de uso (cada paso es un subcomando):
+
+    python roles_salon.py descargar     # 1. baja fotos de la web (por clase)
+    python roles_salon.py recortar      # 2. YOLO recorta cada persona
+    #   >>> REVISA A MANO data_roles/recortes/ y borra los recortes incorrectos <<<
+    python roles_salon.py dividir       # 3. train / validation / test (agrupado por foto)
+    python roles_salon.py entrenar      # 4. base congelada + fine-tuning + evaluación
+    python roles_salon.py contar foto_salon.jpg   # 5. cuenta personas por rol
+    python roles_salon.py contar salon.jpg --mostrar
+
+Si ya tienes un modelo entrenado (clasificador_roles.keras + class_names.json),
+solo necesitas el paso 5.
+
+Dependencias:
+    pip install -U ddgs ultralytics tensorflow keras scikit-learn matplotlib pillow requests numpy
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+import random
+import shutil
+import sys
+import time
+from collections import Counter, defaultdict
+from pathlib import Path
+
+os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuración
+# ──────────────────────────────────────────────────────────────────────────────
+SEED = 42
+IMG_SIZE = (224, 224)
+PERSON_CLASS = 0  # id de 'person' en COCO
+
+CLASSES = ["estudiante", "persona_aseo", "persona_seguridad"]
+
+# Términos en español e inglés; mencionan implementos y ropa que debe aprender el modelo.
+SEARCHES = {
+    "estudiante": [
+        "estudiante con mochila en salón de clase",
+        "estudiantes con cuadernos sentados en el aula",
+        "student with backpack and notebook classroom",
+        "universitario estudiando en el salón",
+    ],
+    "persona_aseo": [
+        "persona de aseo limpiando salón de clase con trapeadora",
+        "señora del aseo con escoba en colegio",
+        "personal de servicios generales limpiando colegio",
+        "janitor mopping school classroom",
+        "cleaning staff uniform broom school",
+    ],
+    "persona_seguridad": [
+        "guardia de seguridad uniforme en colegio",
+        "vigilante de seguridad en universidad",
+        "security guard uniform school hallway",
+        "guardia de seguridad dentro de un salón de clase",
+    ],
+}
+
+# Para aseo/seguridad somos estrictos: si la foto tiene muchas personas, la etiqueta es ambigua.
+MAX_PERSONS_IN_IMAGE = {"estudiante": 10, "persona_aseo": 2, "persona_seguridad": 2}
+MAX_CROPS_PER_IMAGE = {"estudiante": 4, "persona_aseo": 1, "persona_seguridad": 1}
+
+# COCO no tiene escoba/trapeadora: estos objetos son solo "evidencia" que se muestra
+# junto a cada persona; NO alteran la decisión del clasificador.
+OBJECTS_OF_INTEREST = {24: "mochila", 26: "bolso", 63: "laptop", 73: "libro/cuaderno"}
+
+ROLE_COLORS = {
+    "estudiante": "#1f77b4",
+    "persona_aseo": "#2ca02c",
+    "persona_seguridad": "#d62728",
+    "indeterminado": "#7f7f7f",
+}
+ROLE_LABELS = {
+    "estudiante": "Estudiante",
+    "persona_aseo": "Aseo",
+    "persona_seguridad": "Seguridad",
+    "indeterminado": "Indeterminado",
+}
+
+
+def rutas(raiz: str) -> dict:
+    raiz = Path(raiz)
+    return {
+        "raw": raiz / "escenas",        # fotos completas
+        "crops": raiz / "recortes",     # una persona por imagen
+        "split": raiz / "dataset",      # train / validation / test
+        "modelo_dir": raiz / "modelo",
+        "modelo": raiz / "modelo" / "clasificador_roles.keras",
+        "clases": raiz / "modelo" / "class_names.json",
+        "pesos_base": raiz / "modelo" / "pesos_base_congelada.weights.h5",
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Utilidades generales
+# ──────────────────────────────────────────────────────────────────────────────
+def contar_imagenes(root) -> dict:
+    return {f.name: len(list(f.glob("*.jpg"))) for f in sorted(Path(root).iterdir()) if f.is_dir()}
+
+
+def source_id(path) -> str:
+    """'0012__p1.jpg' -> '0012' (foto de la que salió el recorte)."""
+    return Path(path).name.split("__p")[0]
+
+
+def cargar_imagen(fuente: str) -> Image.Image:
+    if str(fuente).startswith("http"):
+        import requests
+        r = requests.get(fuente, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        return ImageOps.exif_transpose(Image.open(io.BytesIO(r.content))).convert("RGB")
+    # Las fotos de celular guardan la rotación en EXIF.
+    return ImageOps.exif_transpose(Image.open(fuente)).convert("RGB")
+
+
+_YOLO = None
+
+
+def get_yolo(weights: str):
+    global _YOLO
+    if _YOLO is None:
+        from ultralytics import YOLO
+        _YOLO = YOLO(weights)
+    return _YOLO
+
+
+def detectar_personas(yolo, img: Image.Image, conf: float = 0.40):
+    res = yolo.predict(img, classes=[PERSON_CLASS], conf=conf, verbose=False)[0]
+    return res.boxes.xyxy.cpu().numpy(), res.boxes.conf.cpu().numpy()
+
+
+def recortar_con_margen(img: Image.Image, box, pad: float = 0.08) -> Image.Image:
+    x1, y1, x2, y2 = [float(v) for v in box]
+    w, h = x2 - x1, y2 - y1
+    x1 = max(0, x1 - pad * w)
+    y1 = max(0, y1 - pad * h)
+    x2 = min(img.width, x2 + pad * w)
+    y2 = min(img.height, y2 + pad * h)
+    return img.crop((int(x1), int(y1), int(x2), int(y2)))
+
+
+def configurar_tf():
+    """TensorFlow y PyTorch (YOLO) comparten GPU: evita que TF reserve toda la memoria."""
+    import tensorflow as tf
+    for gpu in tf.config.list_physical_devices("GPU"):
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError:
+            pass
+    random.seed(SEED)
+    np.random.seed(SEED)
+    tf.random.set_seed(SEED)
+    return tf
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. Descarga de imágenes
+# ──────────────────────────────────────────────────────────────────────────────
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def cmd_descargar(args):
+    import requests
+    from ddgs import DDGS
+
+    P = rutas(args.raiz)
+    raw = P["raw"]
+    raw.mkdir(parents=True, exist_ok=True)
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    seen = {_sha256_bytes(p.read_bytes()) for p in raw.glob("*/*.jpg")}
+
+    for clase, queries in SEARCHES.items():
+        class_dir = raw / clase
+        class_dir.mkdir(parents=True, exist_ok=True)
+        saved = len(list(class_dir.glob("*.jpg")))
+        print(f"\n=== {clase} ===")
+
+        for q in queries:
+            print(f"Buscando: {q!r}")
+            try:
+                results = DDGS().images(query=q, safesearch="moderate",
+                                        max_results=args.por_busqueda, license_image="any")
+            except Exception as e:
+                print("  Error en búsqueda:", e)
+                continue
+
+            for r in results:
+                url = r.get("image")
+                if not url:
+                    continue
+                try:
+                    resp = session.get(url, timeout=8)
+                    resp.raise_for_status()
+                    with Image.open(io.BytesIO(resp.content)) as im:
+                        im = im.convert("RGB")
+                        if min(im.size) < 200:
+                            continue
+                        buf = io.BytesIO()
+                        im.save(buf, format="JPEG", quality=90)
+                    data = buf.getvalue()
+                    h = _sha256_bytes(data)
+                    if h in seen:
+                        continue
+                    (class_dir / f"{saved:04d}.jpg").write_bytes(data)
+                    seen.add(h)
+                    saved += 1
+                except Exception:
+                    pass
+            print(f"  Total guardadas hasta ahora: {saved}")
+            time.sleep(1)
+
+    print("\nDescarga terminada:", contar_imagenes(raw))
+    print("Licencias: úsalas solo con fines educativos y no redistribuyas el dataset.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Detección de personas y recorte automático
+# ──────────────────────────────────────────────────────────────────────────────
+def cmd_recortar(args):
+    P = rutas(args.raiz)
+    if not P["raw"].exists():
+        sys.exit(f"No existe {P['raw']}. Ejecuta primero: python roles_salon.py descargar")
+    yolo = get_yolo(args.yolo)
+
+    if P["crops"].exists():
+        shutil.rmtree(P["crops"])
+
+    for class_dir in sorted(P["raw"].iterdir()):
+        if not class_dir.is_dir() or class_dir.name not in CLASSES:
+            continue
+        name = class_dir.name
+        out_dir = P["crops"] / name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        s = dict(fotos=0, sin_persona=0, ambiguas=0, recortes=0)
+
+        for path in sorted(class_dir.glob("*.jpg")):
+            s["fotos"] += 1
+            with Image.open(path) as im:
+                img = im.convert("RGB")
+            boxes, _ = detectar_personas(yolo, img, args.conf)
+            relevant = [b for b in boxes if min(b[2] - b[0], b[3] - b[1]) >= args.min_lado]
+
+            if not relevant:
+                s["sin_persona"] += 1
+                continue
+            if len(relevant) > MAX_PERSONS_IN_IMAGE[name]:
+                s["ambiguas"] += 1
+                continue
+
+            relevant.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+            for k, box in enumerate(relevant[:MAX_CROPS_PER_IMAGE[name]]):
+                recortar_con_margen(img, box).save(out_dir / f"{path.stem}__p{k}.jpg",
+                                                   format="JPEG", quality=90)
+                s["recortes"] += 1
+        print(f"{name:20s}", s)
+
+    print("\nRecortes por clase:", contar_imagenes(P["crops"]))
+    print(f"\n>>> Revisa {P['crops']} y borra a mano los recortes que NO correspondan a la clase")
+    print("    (p. ej. un estudiante dentro de persona_aseo, ilustraciones, carteles con texto).")
+    print("    Meta: >= 80-100 recortes limpios por clase. Luego ejecuta: dividir")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. Split agrupado por foto de origen (evita data leakage)
+# ──────────────────────────────────────────────────────────────────────────────
+def cmd_dividir(args):
+    P = rutas(args.raiz)
+    if not P["crops"].exists():
+        sys.exit(f"No existe {P['crops']}. Ejecuta primero: python roles_salon.py recortar")
+    if P["split"].exists():
+        shutil.rmtree(P["split"])
+    rng = random.Random(SEED)
+
+    for class_dir in sorted(P["crops"].iterdir()):
+        if not class_dir.is_dir():
+            continue
+        groups = defaultdict(list)
+        for f in class_dir.glob("*.jpg"):
+            groups[source_id(f)].append(f)
+
+        keys = sorted(groups)
+        rng.shuffle(keys)
+        n = len(keys)
+        n_train, n_val = int(n * 0.70), int(n * 0.15)
+        split_keys = {
+            "train": keys[:n_train],
+            "validation": keys[n_train:n_train + n_val],
+            "test": keys[n_train + n_val:],
+        }
+        for split_name, ks in split_keys.items():
+            target = P["split"] / split_name / class_dir.name
+            target.mkdir(parents=True, exist_ok=True)
+            for k in ks:
+                for src in groups[k]:
+                    shutil.copy2(src, target / src.name)
+
+    for split in ["train", "validation", "test"]:
+        print(f"{split:11s}", contar_imagenes(P["split"] / split))
+
+    sources = {s: {(p.parent.name, source_id(p)) for p in (P["split"] / s).rglob("*.jpg")}
+               for s in ["train", "validation", "test"]}
+    assert not (sources["train"] & sources["validation"])
+    assert not (sources["train"] & sources["test"])
+    assert not (sources["validation"] & sources["test"])
+    print("\n✓ Ninguna foto de origen se comparte entre train, validation y test.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Entrenamiento: base congelada -> fine-tuning -> selección por validation
+# ──────────────────────────────────────────────────────────────────────────────
+def construir_modelo(num_classes: int):
+    import keras
+    from keras import layers
+
+    # Sin volteo vertical ni cambios fuertes de color: el color del uniforme es una señal útil.
+    augmentation = keras.Sequential([
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.06),
+        layers.RandomZoom(0.10),
+        layers.RandomBrightness(0.15, value_range=(0, 255)),
+        layers.RandomContrast(0.15),
+    ], name="augmentation")
+
+    base = keras.applications.EfficientNetB0(
+        include_top=False, weights="imagenet", input_shape=(*IMG_SIZE, 3))
+    base.trainable = False
+
+    inputs = keras.Input(shape=(*IMG_SIZE, 3))
+    x = augmentation(inputs)
+    x = base(x, training=False)  # EfficientNet ya normaliza internamente (entra 0-255)
+    x = layers.GlobalAveragePooling2D(name="gap")(x)
+    x = layers.Dropout(0.3, name="dropout")(x)
+    outputs = layers.Dense(num_classes, activation="softmax", name="clasificador")(x)
+    return keras.Model(inputs, outputs), base
+
+
+def plot_history(h, title="", save_path=None, mostrar=False):
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(h.history["accuracy"], label="train accuracy")
+    axes[0].plot(h.history["val_accuracy"], label="val accuracy")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Accuracy")
+    axes[0].set_title("Accuracy (Train vs Val)")
+    axes[0].legend()
+    axes[0].grid(True, linestyle="--", alpha=0.5)
+
+    axes[1].plot(h.history["loss"], label="train loss")
+    axes[1].plot(h.history["val_loss"], label="val loss")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Loss")
+    axes[1].set_title("Loss (Train vs Val)")
+    axes[1].legend()
+    axes[1].grid(True, linestyle="--", alpha=0.5)
+
+    fig.suptitle(title)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=120)
+        print("Curvas de aprendizaje guardadas en", save_path)
+    if mostrar:
+        plt.show()
+    plt.close(fig)
+
+
+def evaluar(model, dataset, class_names, titulo, png_path, mostrar=False):
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import (ConfusionMatrixDisplay, classification_report,
+                                 confusion_matrix, f1_score)
+
+    y_true = np.concatenate([y.numpy() for _, y in dataset])
+    y_pred = model.predict(dataset, verbose=0).argmax(axis=1)
+    acc = float((y_true == y_pred).mean())
+    f1 = float(f1_score(y_true, y_pred, average="macro"))
+
+    print(f"\n--- {titulo} ---  accuracy={acc:.4f}  F1 macro={f1:.4f}")
+    print(classification_report(y_true, y_pred, target_names=class_names, digits=3, zero_division=0))
+
+    cm = confusion_matrix(y_true, y_pred, labels=range(len(class_names)))
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ConfusionMatrixDisplay(cm, display_labels=class_names).plot(cmap="Blues", xticks_rotation=45, ax=ax)
+    plt.title(titulo)
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=120)
+    if mostrar:
+        plt.show()
+    plt.close(fig)
+    print("Matriz de confusión guardada en", png_path)
+    return acc, f1
+
+
+def cmd_entrenar(args):
+    if not getattr(args, "mostrar_graficas", False):
+        import matplotlib
+        matplotlib.use("Agg")
+
+    tf = configurar_tf()
+    import keras
+    from sklearn.utils.class_weight import compute_class_weight
+    from keras import layers
+
+    P = rutas(args.raiz)
+    if not (P["split"] / "train").exists():
+        sys.exit(f"No existe {P['split']}. Ejecuta primero: python roles_salon.py dividir")
+    P["modelo_dir"].mkdir(parents=True, exist_ok=True)
+
+    kw = dict(image_size=IMG_SIZE, batch_size=args.batch, label_mode="int")
+    train_ds = keras.utils.image_dataset_from_directory(P["split"] / "train", shuffle=True, seed=SEED, **kw)
+    val_ds = keras.utils.image_dataset_from_directory(P["split"] / "validation", shuffle=False, **kw)
+    test_ds = keras.utils.image_dataset_from_directory(P["split"] / "test", shuffle=False, **kw)
+
+    class_names = train_ds.class_names
+    num_classes = len(class_names)
+
+    train_labels = np.concatenate([y.numpy() for _, y in train_ds])
+    w = compute_class_weight("balanced", classes=np.arange(num_classes), y=train_labels)
+    class_weight = {i: float(v) for i, v in enumerate(w)}
+    print("Clases:", class_names)
+    print("Train por clase:", dict(zip(class_names, np.bincount(train_labels))))
+    print("class_weight:", {class_names[i]: round(v, 2) for i, v in class_weight.items()})
+
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+    test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
+
+    model, base_model = construir_modelo(num_classes)
+
+    # --- Etapa A: base congelada, solo se entrena la cabeza ---
+    model.compile(optimizer=keras.optimizers.Adam(1e-3),
+                  loss=keras.losses.SparseCategoricalCrossentropy(), metrics=["accuracy"])
+    h_base = model.fit(
+        train_ds, validation_data=val_ds, epochs=args.epocas_base, class_weight=class_weight,
+        callbacks=[keras.callbacks.EarlyStopping(monitor="val_loss", patience=3,
+                                                 restore_best_weights=True)])
+    model.save_weights(P["pesos_base"])
+    plot_history(h_base, "Base congelada: Curvas de Aprendizaje",
+                 save_path=P["modelo_dir"] / "curvas_base_congelada.png",
+                 mostrar=args.mostrar_graficas)
+    acc_b, f1_b = evaluar(model, test_ds, class_names, "Antes del fine-tuning",
+                          P["modelo_dir"] / "confusion_antes.png",
+                          mostrar=args.mostrar_graficas)
+
+    # --- Etapa B: fine-tuning de las últimas N capas (BatchNorm sigue congelada) ---
+    base_model.trainable = True
+    for layer in base_model.layers[:-args.n_descongeladas]:
+        layer.trainable = False
+    for layer in base_model.layers:
+        if isinstance(layer, layers.BatchNormalization):
+            layer.trainable = False
+    print("Capas entrenables de la base:",
+          sum(l.trainable for l in base_model.layers), "/", len(base_model.layers))
+
+    model.compile(optimizer=keras.optimizers.Adam(1e-5),   # LR mucho menor
+                  loss=keras.losses.SparseCategoricalCrossentropy(), metrics=["accuracy"])
+    h_ft = model.fit(
+        train_ds, validation_data=val_ds, epochs=args.epocas_ft, class_weight=class_weight,
+        callbacks=[keras.callbacks.EarlyStopping(monitor="val_loss", patience=3,
+                                                 restore_best_weights=True)])
+    plot_history(h_ft, "Fine-tuning: Curvas de Aprendizaje",
+                 save_path=P["modelo_dir"] / "curvas_fine_tuning.png",
+                 mostrar=args.mostrar_graficas)
+    acc_a, f1_a = evaluar(model, test_ds, class_names, "Después del fine-tuning",
+                          P["modelo_dir"] / "confusion_despues.png",
+                          mostrar=args.mostrar_graficas)
+
+    print(f"\n{'':26s}{'accuracy':>10s}{'F1 macro':>10s}")
+    print(f"{'Antes del fine-tuning':26s}{acc_b:10.4f}{f1_b:10.4f}")
+    print(f"{'Después del fine-tuning':26s}{acc_a:10.4f}{f1_a:10.4f}")
+
+    # La selección del modelo final se hace con VALIDATION, no con test.
+    best_base = min(h_base.history["val_loss"])
+    best_ft = min(h_ft.history["val_loss"])
+    print(f"\nMejor val_loss base congelada: {best_base:.4f} | fine-tuning: {best_ft:.4f}")
+    if best_ft <= best_base:
+        print("Modelo final: fine-tuning")
+    else:
+        model.load_weights(P["pesos_base"])
+        print("Modelo final: base congelada")
+
+    model.save(P["modelo"])
+    P["clases"].write_text(json.dumps(class_names, ensure_ascii=False), encoding="utf-8")
+    print(f"\nGuardado: {P['modelo']} y {P['clases']}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. Inferencia: contar personas por rol en una imagen de salón
+# ──────────────────────────────────────────────────────────────────────────────
+def _font(size: int):
+    for name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def analizar_salon(fuente, yolo, model, class_names, conf_person=0.40, min_conf_role=0.60,
+                   min_side=48, show_objects=True):
+    """Detecta personas, clasifica el rol de cada una y devuelve (imagen, detecciones, conteo)."""
+    img = cargar_imagen(fuente)
+    res = yolo.predict(img, conf=conf_person, verbose=False)[0]
+    boxes = res.boxes.xyxy.cpu().numpy()
+    cls = res.boxes.cls.cpu().numpy().astype(int)
+
+    person_idx = [i for i, c in enumerate(cls)
+                  if c == PERSON_CLASS and min(boxes[i][2] - boxes[i][0], boxes[i][3] - boxes[i][1]) >= min_side]
+
+    detections = []
+    if person_idx:
+        crops = np.stack([
+            np.array(recortar_con_margen(img, boxes[i]).resize(IMG_SIZE), dtype="float32")
+            for i in person_idx
+        ])
+        probs = model.predict(crops, verbose=0)
+
+        for j, i in enumerate(person_idx):
+            k = int(probs[j].argmax())
+            conf = float(probs[j][k])
+            role = class_names[k] if conf >= min_conf_role else "indeterminado"
+
+            objs = []
+            if show_objects:
+                x1, y1, x2, y2 = boxes[i]
+                for b, c in zip(boxes, cls):
+                    if c in OBJECTS_OF_INTEREST:
+                        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+                        if x1 <= cx <= x2 and y1 <= cy <= y2:
+                            objs.append(OBJECTS_OF_INTEREST[c])
+            detections.append(dict(box=[float(v) for v in boxes[i]], role=role,
+                                   conf=conf, objects=sorted(set(objs))))
+
+    conteo = Counter({r: 0 for r in list(class_names) + ["indeterminado"]})
+    conteo.update(d["role"] for d in detections)
+    return img, detections, conteo
+
+
+def dibujar_resultados(img: Image.Image, detections, conteo) -> Image.Image:
+    W, H = img.size
+    lw = max(2, W // 400)
+    fs = max(12, W // 70)
+    font = _font(fs)
+
+    resumen = "  |  ".join(f"{ROLE_LABELS.get(r, r)}: {n}" for r, n in conteo.items()
+                           if n > 0 or r != "indeterminado")
+    header = f"Personas: {len(detections)}   {resumen}"
+    header_h = int(fs * 2.2)
+    canvas = Image.new("RGB", (W, H + header_h), "#111111")
+    canvas.paste(img, (0, header_h))
+    draw = ImageDraw.Draw(canvas)
+    draw.text((10, header_h // 2), header, fill="white", font=_font(int(fs * 1.2)), anchor="lm")
+
+    for d in detections:
+        x1, y1, x2, y2 = d["box"]
+        y1 += header_h
+        y2 += header_h
+        color = ROLE_COLORS.get(d["role"], "#000000")
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=lw)
+
+        label = f"{ROLE_LABELS.get(d['role'], d['role'])} {d['conf']:.0%}"
+        if d["objects"]:
+            label += "\n+ " + ", ".join(d["objects"])
+        l, t, r, b = draw.multiline_textbbox((0, 0), label, font=font)
+        tw, th = r - l + 6, b - t + 6
+        ty = y1 - th if y1 - th >= header_h else y1
+        draw.rectangle([x1, ty, x1 + tw, ty + th], fill=color)
+        draw.multiline_text((x1 + 3, ty + 3), label, fill="white", font=font)
+    return canvas
+
+
+def cmd_contar(args):
+    P = rutas(args.raiz)
+    modelo_path = Path(args.modelo) if args.modelo else P["modelo"]
+    clases_path = Path(args.clases) if args.clases else P["clases"]
+    if not modelo_path.exists() or not clases_path.exists():
+        sys.exit(f"No encuentro el modelo ({modelo_path}) o las clases ({clases_path}).\n"
+                 "Entrena primero con 'entrenar' o indica --modelo y --clases.")
+
+    configurar_tf()
+    import keras
+    model = keras.saving.load_model(modelo_path)
+    class_names = json.loads(clases_path.read_text(encoding="utf-8"))
+    yolo = get_yolo(args.yolo)
+
+    salida = Path(args.salida)
+    salida.mkdir(parents=True, exist_ok=True)
+    resultados = []
+
+    for fuente in args.imagenes:
+        try:
+            img, dets, conteo = analizar_salon(
+                fuente, yolo, model, class_names,
+                conf_person=args.conf_persona, min_conf_role=args.min_conf_rol,
+                min_side=args.min_lado, show_objects=not args.sin_objetos)
+        except Exception as e:
+            print(f"[ERROR] {fuente}: {e}")
+            continue
+
+        print(f"\nImagen: {fuente}")
+        print(f"  Personas detectadas: {len(dets)}")
+        for rol, n in conteo.items():
+            if rol != "indeterminado" or n > 0:
+                print(f"  {ROLE_LABELS.get(rol, rol):14s}: {n}")
+
+        nombre = Path(str(fuente).split("?")[0]).stem or "imagen"
+        out_path = salida / f"{nombre}_roles.jpg"
+        anotada = dibujar_resultados(img, dets, conteo)
+        anotada.save(out_path, quality=92)
+        print(f"  Imagen anotada: {out_path}")
+        if args.mostrar:
+            anotada.show()
+
+        resultados.append(dict(imagen=str(fuente), total=len(dets), conteo=dict(conteo),
+                               detecciones=dets, imagen_anotada=str(out_path)))
+
+    if args.json and resultados:
+        json_path = salida / "resultados.json"
+        json_path.write_text(json.dumps(resultados, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\nResultados guardados en {json_path}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser(
+        description="Detección de personas en salones y conteo por rol "
+                    "(estudiante / aseo / seguridad).")
+    ap.add_argument("--raiz", default="data_roles", help="Carpeta de trabajo (datos y modelo).")
+    ap.add_argument("--yolo", default="yolov8m.pt",
+                    help="Pesos de YOLO: yolov8n.pt (rápido), yolov8s.pt, yolov8m.pt (más preciso).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("descargar", help="Descarga fotos de la web por clase.")
+    p.add_argument("--por-busqueda", type=int, default=50)
+    p.set_defaults(func=cmd_descargar)
+
+    p = sub.add_parser("recortar", help="YOLO detecta personas y las recorta.")
+    p.add_argument("--conf", type=float, default=0.40)
+    p.add_argument("--min-lado", type=int, default=96)
+    p.set_defaults(func=cmd_recortar)
+
+    p = sub.add_parser("dividir", help="Split train/validation/test agrupado por foto.")
+    p.set_defaults(func=cmd_dividir)
+
+    p = sub.add_parser("entrenar", help="Transfer learning + fine-tuning + evaluación.")
+    p.add_argument("--batch", type=int, default=32)
+    p.add_argument("--epocas-base", type=int, default=15)
+    p.add_argument("--epocas-ft", type=int, default=8)
+    p.add_argument("--n-descongeladas", type=int, default=20)
+    p.add_argument("--mostrar-graficas", action="store_true",
+                   help="Mostrar las ventanas de gráficas de accuracy/loss y matrices de confusión.")
+    p.set_defaults(func=cmd_entrenar)
+
+    p = sub.add_parser("contar", help="Cuenta personas por rol en una o varias imágenes.")
+    p.add_argument("imagenes", nargs="+", help="Rutas o URLs de imágenes de salones.")
+    p.add_argument("--modelo", help="Ruta al .keras (por defecto, el entrenado en --raiz).")
+    p.add_argument("--clases", help="Ruta al class_names.json.")
+    p.add_argument("--salida", default="resultados", help="Carpeta para las imágenes anotadas.")
+    p.add_argument("--conf-persona", type=float, default=0.40,
+                   help="Más alto = menos falsos positivos de persona.")
+    p.add_argument("--min-conf-rol", type=float, default=0.60,
+                   help="Más alto = más personas marcadas como 'indeterminado'.")
+    p.add_argument("--min-lado", type=int, default=48,
+                   help="Lado mínimo (px) de una persona para considerarla.")
+    p.add_argument("--sin-objetos", action="store_true",
+                   help="No mostrar mochila/bolso/laptop/libro como evidencia.")
+    p.add_argument("--json", action="store_true", help="Guardar resultados.json.")
+    p.add_argument("--mostrar", action="store_true", help="Abrir la imagen anotada.")
+    p.set_defaults(func=cmd_contar)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

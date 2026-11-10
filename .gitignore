@@ -1,0 +1,7 @@
+node_modules
+dist
+.venv
+__pycache__
+*.pt
+vision-service/data_roles/*
+!vision-service/data_roles/modelo
