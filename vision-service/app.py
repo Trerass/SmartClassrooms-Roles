@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -16,6 +17,7 @@ if P["yolo_roles"].exists():  # YOLOv8m entrenado con roles reemplaza a las dos 
     from ultralytics import YOLO
 
     roles = YOLO(P["yolo_roles"])
+    rs.validar_clases(roles.names)
 
     def analizar_foto(fuente):
         return rs.analizar_salon_yolo(fuente, roles)
@@ -41,12 +43,18 @@ async def analizar(foto: UploadFile = File(...)):
     if len(data) > MAX_BYTES:
         raise HTTPException(413, "La foto supera los 15 MB.")
     try:
-        img, dets, conteo = analizar_foto(io.BytesIO(data))
-    except (OSError, Image.DecompressionBombError):  # archivo que no es imagen, truncado o enorme
+        with Image.open(io.BytesIO(data)) as im:
+            im.load()
+    except Exception:  # Pillow lanza varios tipos según cómo esté dañado el archivo
         raise HTTPException(400, "El archivo no es una imagen válida (usa JPG, PNG o WebP).")
 
-    buf = io.BytesIO()
-    rs.dibujar_resultados(img, dets, conteo).save(buf, format="JPEG", quality=90)
+    try:
+        img, dets, conteo = analizar_foto(io.BytesIO(data))
+        buf = io.BytesIO()
+        rs.dibujar_resultados(img, dets, conteo).save(buf, format="JPEG", quality=90)
+    except Exception:
+        logging.exception("Falló el análisis de una foto")
+        raise HTTPException(500, "No se pudo analizar la foto. Inténtalo de nuevo.")
     return {
         "total": len(dets),
         "roles": [

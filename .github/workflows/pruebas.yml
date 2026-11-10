@@ -1,0 +1,40 @@
+name: Pruebas
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vision-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias (sin TensorFlow ni PyTorch)
+        run: |
+          grep -E '^(numpy|pillow|fastapi|python-multipart|httpx)==' requirements.txt > ligeras.txt
+          pip install -r ligeras.txt
+      - run: python test_roles_salon.py
+      - run: python test_api_errores.py
+
+  pagina:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build

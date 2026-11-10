@@ -32,7 +32,19 @@ pnpm dev
 
 Abre `http://localhost:5173`. Para abrirla desde un celular en la misma red WiFi, usa `pnpm dev --host` y entra con la IP del PC. Las fotos no se conservan al terminar el análisis.
 
-Prueba de la API: `python test_app.py` dentro de `vision-service`.
+## Pruebas
+
+GitHub Actions ejecuta las pruebas rápidas en cada `push`. Para correrlas a mano:
+
+```powershell
+cd vision-service
+python test_roles_salon.py   # etiquetado y dataset
+python test_api_errores.py   # errores de la API, sin modelos
+python test_app.py           # API con los modelos reales (1-2 minutos)
+
+cd ..\frontend
+pnpm test                    # flujo de la página
+```
 
 ## Modelo
 

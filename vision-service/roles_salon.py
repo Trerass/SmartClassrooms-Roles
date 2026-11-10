@@ -668,6 +668,12 @@ def linea_yolo(box, ancho, alto, clase_id) -> str:
             f"{(x2 - x1) / ancho:.6f} {(y2 - y1) / alto:.6f}")
 
 
+def validar_clases(nombres):
+    """Evita activar unos pesos que no se entrenaron con los tres roles."""
+    if set(nombres.values()) != set(CLASSES):
+        sys.exit(f"Los pesos tienen las clases {sorted(nombres.values())}, se esperaban {CLASSES}.")
+
+
 def cmd_etiquetar(args):
     P = rutas(args.raiz)
     if not P["raw"].exists():
@@ -681,7 +687,7 @@ def cmd_etiquetar(args):
         # Si todos los recortes de una foto ya revisada se borraron, esa foto se descartó a mano.
         con_recorte = {source_id(f) for f in (P["crops"] / name).glob("*.jpg")}
         ultima_revisada = max(con_recorte, default="")
-        s = dict(nuevas=0, sin_persona=0, ambiguas=0, descartadas=0)
+        s = dict(nuevas=0, sin_persona=0, ambiguas=0, descartadas=0, ilegibles=0)
 
         for path in sorted((P["raw"] / name).glob("*.jpg")):
             # Es incremental: volver a ejecutarlo no deshace lo que ya se revisó.
@@ -690,8 +696,12 @@ def cmd_etiquetar(args):
             if path.stem <= ultima_revisada and path.stem not in con_recorte:
                 s["descartadas"] += 1
                 continue
-            with Image.open(path) as im:
-                img = im.convert("RGB")
+            try:
+                with Image.open(path) as im:
+                    img = im.convert("RGB")
+            except Exception:  # un archivo dañado no debe detener todo el etiquetado
+                s["ilegibles"] += 1
+                continue
             boxes, _ = detectar_personas(yolo, img, args.conf)
             if len(boxes) == 0:
                 s["sin_persona"] += 1
@@ -718,6 +728,8 @@ def cmd_dividir_yolo(args):
     P = rutas(args.raiz)
     if not P["revision"].exists():
         sys.exit(f"No existe {P['revision']}. Ejecuta primero: python roles_salon.py etiquetar")
+    if not any(P["revision"].glob("*/*.jpg")):
+        sys.exit(f"No quedan fotos en {P['revision']}: no se cambió el dataset.")
     if P["yolo"].exists():
         shutil.rmtree(P["yolo"])
     rng = random.Random(SEED)
@@ -772,6 +784,7 @@ def cmd_comparar(args):
     model = keras.saving.load_model(P["modelo"])
     class_names = json.loads(P["clases"].read_text(encoding="utf-8"))
     yolo, roles = get_yolo(args.yolo), YOLO(pesos)
+    validar_clases(roles.names)
     metodos = {"Dos etapas": lambda f: analizar_salon(f, yolo, model, class_names),
                "YOLO con roles": lambda f: analizar_salon_yolo(f, roles)}
 

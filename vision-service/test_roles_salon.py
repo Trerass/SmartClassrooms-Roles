@@ -44,4 +44,34 @@ with tempfile.TemporaryDirectory() as d:
         assert (P["yolo"] / "labels" / f.parent.name / f"{f.stem}.txt").exists()
     assert len(imagenes) == len(nombres)  # ninguna foto en dos particiones
 
+# Un archivo dañado se salta y el resto se etiqueta.
+with tempfile.TemporaryDirectory() as d:
+    P = rs.rutas(d)
+    (P["raw"] / "estudiante").mkdir(parents=True)
+    (P["raw"] / "estudiante" / "0000.jpg").write_bytes(b"no es una imagen")
+    Image.new("RGB", (20, 20)).save(P["raw"] / "estudiante" / "0001.jpg")
+    rs.cmd_etiquetar(Namespace(raiz=d, yolo="x", conf=0.4))
+    assert {f.stem for f in (P["etiquetas"] / "estudiante").glob("*.txt")} == {"0001"}
+
+# Si se borraron todas las fotos, el dataset anterior no se pierde.
+with tempfile.TemporaryDirectory() as d:
+    P = rs.rutas(d)
+    (P["revision"] / "estudiante").mkdir(parents=True)
+    P["yolo"].mkdir(parents=True)
+    (P["yolo"] / "data.yaml").write_text("x")
+    try:
+        rs.cmd_dividir_yolo(Namespace(raiz=d))
+        raise AssertionError("debía detenerse")
+    except SystemExit:
+        pass
+    assert (P["yolo"] / "data.yaml").exists()
+
+# Unos pesos con otras clases se rechazan.
+rs.validar_clases(dict(enumerate(rs.CLASSES)))
+try:
+    rs.validar_clases({0: "person"})
+    raise AssertionError("debía rechazarlos")
+except SystemExit:
+    pass
+
 print("OK")

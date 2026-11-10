@@ -10,6 +10,9 @@ const SALONES = [
   { id: "38-201", nombre: "Aula 38-201", capacidad: 45 },
 ];
 
+const TIPOS = ["image/jpeg", "image/png", "image/webp"];
+const LIMITE_MS = 180_000; // sin GPU una foto grande tarda, pero nunca tanto
+
 interface Resultado {
   total: number;
   roles: { rol: string; color: string; personas: number }[];
@@ -27,7 +30,7 @@ async function analizar(archivo: File): Promise<Resultado> {
   form.append("foto", archivo);
   let respuesta: Response;
   try {
-    respuesta = await fetch("/analizar", { method: "POST", body: form });
+    respuesta = await fetch("/analizar", { method: "POST", body: form, signal: AbortSignal.timeout(LIMITE_MS) });
   } catch {
     throw new Error("No se pudo conectar con el servicio de análisis.");
   }
@@ -56,6 +59,10 @@ export default function App() {
     const archivo = e.target.files?.[0];
     e.target.value = ""; // permite volver a elegir la misma foto
     if (!archivo) return;
+    if (!TIPOS.includes(archivo.type)) {
+      setError("Formato no admitido. Usa JPG, PNG o WebP.");
+      return;
+    }
     setError("");
     setFotos((prev) => ({ ...prev, [salonId]: { archivo, url: URL.createObjectURL(archivo) } }));
     estadoRef.current?.focus();
@@ -135,7 +142,7 @@ export default function App() {
           <input
             ref={inputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp"
+            accept={TIPOS.join(",")}
             className="hidden"
             onChange={alElegirFoto}
             aria-label={`Foto de ${salon.nombre}`}
