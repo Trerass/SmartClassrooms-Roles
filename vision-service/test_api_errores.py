@@ -44,6 +44,22 @@ r = enviar(jpg)
 assert r.status_code == 200, r.text
 assert r.json()["total"] == 0
 assert [x["rol"] for x in r.json()["roles"]] == ["Estudiante", "Aseo", "Seguridad"]  # sin Indeterminado si es 0
+assert r.json()["detecciones"] == [] and (r.json()["ancho"], r.json()["alto"]) == (64, 64)
+
+
+def dos_personas(fuente):
+    det = lambda x, rol, conf: dict(box=[x, 5.4, x + 10.6, 30.0], role=rol, conf=conf, objects=["laptop"])
+    dets = [det(40.0, "persona_aseo", 0.9876), det(2.0, "indeterminado", 0.5)]
+    return rs.cargar_imagen(fuente), dets, Counter(d["role"] for d in dets)
+
+
+# Cada persona llega con su caja en enteros, numerada de izquierda a derecha.
+api.analizar_foto = dos_personas
+d = enviar(jpg).json()["detecciones"]
+assert [x["rol"] for x in d] == ["Indeterminado", "Aseo"], d
+assert d[1] == {"rol": "Aseo", "color": rs.ROLE_COLORS["persona_aseo"], "confianza": 0.988,
+                "caja": [40, 5, 51, 30], "objetos": ["laptop"]}, d[1]
+api.analizar_foto = sin_personas
 
 # Archivos que no son una imagen válida: 400 con un mensaje que la página pueda mostrar.
 ihdr_truncado = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x02IHDR\x00\x00\x00\x00\x00\x00"

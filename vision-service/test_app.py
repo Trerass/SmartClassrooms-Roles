@@ -15,7 +15,10 @@ assert r.status_code == 200, r.text
 body = r.json()
 assert body["total"] > 0
 assert sum(x["personas"] for x in body["roles"]) == body["total"]
-assert body["imagen"].startswith("data:image/jpeg;base64,")
+assert len(body["detecciones"]) == body["total"]
+for d in body["detecciones"]:
+    x1, y1, x2, y2 = d["caja"]
+    assert 0 <= x1 < x2 <= body["ancho"] and 0 <= y1 < y2 <= body["alto"], d
 
 # Las personas pequeñas de una foto de poca resolución también cuentan.
 buf = io.BytesIO()

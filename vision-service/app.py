@@ -1,5 +1,4 @@
 """API que recibe una foto y devuelve las personas contadas por rol y la imagen anotada."""
-import base64
 import io
 import json
 import logging
@@ -50,17 +49,23 @@ async def analizar(foto: UploadFile = File(...)):
 
     try:
         img, dets, conteo = analizar_foto(io.BytesIO(data))
-        buf = io.BytesIO()
-        rs.dibujar_resultados(img, dets, conteo).save(buf, format="JPEG", quality=90)
     except Exception:
         logging.exception("Falló el análisis de una foto")
         raise HTTPException(500, "No se pudo analizar la foto. Inténtalo de nuevo.")
+    # La página dibuja los recuadros sobre la foto original; ancho y alto ya traen la rotación EXIF aplicada.
     return {
         "total": len(dets),
+        "ancho": img.width,
+        "alto": img.height,
         "roles": [
             {"rol": rs.ROLE_LABELS[r], "color": rs.ROLE_COLORS[r], "personas": n}
             for r, n in conteo.items()
             if n > 0 or r != "indeterminado"
         ],
-        "imagen": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode(),
+        # De izquierda a derecha, para que la numeración se lea en el mismo orden que la foto.
+        "detecciones": [
+            {"rol": rs.ROLE_LABELS[d["role"]], "color": rs.ROLE_COLORS[d["role"]],
+             "confianza": round(d["conf"], 3), "caja": [round(v) for v in d["box"]], "objetos": d["objects"]}
+            for d in sorted(dets, key=lambda d: d["box"][0])
+        ],
     }

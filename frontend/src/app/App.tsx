@@ -13,17 +13,30 @@ const SALONES = [
 const TIPOS = ["image/jpeg", "image/png", "image/webp"];
 const LIMITE_MS = 180_000; // sin GPU una foto grande tarda, pero nunca tanto
 
+interface Deteccion {
+  rol: string;
+  color: string;
+  confianza: number;
+  caja: [number, number, number, number];
+  objetos: string[];
+}
+
 interface Resultado {
   total: number;
+  ancho: number;
+  alto: number;
   roles: { rol: string; color: string; personas: number }[];
-  imagen: string;
+  detecciones: Deteccion[];
 }
 
 interface Foto {
   archivo: File;
   url: string;
   resultado?: Resultado;
+  visibles?: boolean[];
 }
+
+type Salon = (typeof SALONES)[number];
 
 async function analizar(archivo: File): Promise<Resultado> {
   const form = new FormData();
@@ -73,7 +86,7 @@ export default function App() {
     setError("");
     try {
       const r = await analizar(foto.archivo);
-      setFotos((prev) => ({ ...prev, [salonId]: { ...foto, resultado: r } }));
+      setFotos((prev) => ({ ...prev, [salonId]: { ...foto, resultado: r, visibles: r.detecciones.map(() => true) } }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -175,42 +188,155 @@ export default function App() {
           </p>
         </div>
 
-        {foto && (
-          <div className={cn("grid grid-cols-1 gap-6 items-start", resultado && "lg:grid-cols-[1fr_16rem]")}>
-            <img
-              src={resultado?.imagen ?? foto.url}
-              alt={
-                resultado
-                  ? `Foto de ${salon.nombre} con ${resultado.total} personas remarcadas por rol`
-                  : `Foto de ${salon.nombre} sin procesar`
-              }
-              className="w-full rounded-xl border border-gray-200"
-            />
-            {resultado && (
-              <Card>
-                <CardContent className="p-6 space-y-4">
-                  <div>
-                    <p className="text-sm text-gray-500">Personas</p>
-                    <p className="text-4xl font-bold text-gray-900">{resultado.total}</p>
-                    <p className="text-sm text-gray-500">
-                      {Math.round((resultado.total / salon.capacidad) * 100)}% de la capacidad
-                    </p>
-                  </div>
-                  <ul className="space-y-2">
-                    {resultado.roles.map((r) => (
-                      <li key={r.rol} className="flex items-center gap-2 text-gray-900">
-                        <span className="w-3 h-3 rounded-full" style={{ backgroundColor: r.color }} aria-hidden />
-                        <span className="flex-1">{r.rol}</span>
-                        <span className="font-semibold tabular-nums">{r.personas}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </CardContent>
-              </Card>
-            )}
-          </div>
+        {foto && !resultado && (
+          <img src={foto.url} alt={`Foto de ${salon.nombre} sin procesar`} className="w-full rounded-xl border border-gray-200" />
+        )}
+        {foto && resultado && (
+          <VistaResultado
+            salon={salon}
+            url={foto.url}
+            resultado={resultado}
+            visibles={foto.visibles!}
+            onVisibles={(visibles) => setFotos((prev) => ({ ...prev, [salonId]: { ...prev[salonId], visibles } }))}
+          />
         )}
       </main>
+    </div>
+  );
+}
+
+function VistaResultado({
+  salon,
+  url,
+  resultado,
+  visibles,
+  onVisibles,
+}: {
+  salon: Salon;
+  url: string;
+  resultado: Resultado;
+  visibles: boolean[];
+  onVisibles: (visibles: boolean[]) => void;
+}) {
+  const [activa, setActiva] = useState<number | null>(null);
+  const { ancho, alto, detecciones } = resultado;
+  const letra = Math.max(ancho, alto) / 45;
+  const area = (d: Deteccion) => (d.caja[2] - d.caja[0]) * (d.caja[3] - d.caja[1]);
+  // Las cajas grandes se dibujan primero: así una pequeña dentro de otra se puede seleccionar.
+  const orden = detecciones.map((_, i) => i).sort((a, b) => area(detecciones[b]) - area(detecciones[a]));
+
+  const elegirCaja = (i: number) => {
+    setActiva(i);
+    document.getElementById(`deteccion-${i}`)?.scrollIntoView?.({ block: "nearest" });
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-[1fr_18rem] gap-6 items-start">
+      <div className="relative">
+        <img
+          src={url}
+          alt={`Foto de ${salon.nombre} con ${resultado.total} personas detectadas`}
+          className="w-full rounded-xl border border-gray-200"
+        />
+        {/* La lista de la derecha es la forma accesible de elegir; los recuadros son un atajo con el mouse. */}
+        <svg viewBox={`0 0 ${ancho} ${alto}`} className="absolute inset-0 w-full h-full" aria-hidden>
+          {orden
+            .filter((i) => visibles[i])
+            .map((i) => {
+              const d = detecciones[i];
+              const [x1, y1, x2, y2] = d.caja;
+              return (
+                <g key={i} data-deteccion={i} className="cursor-pointer" onClick={() => elegirCaja(i)} onMouseEnter={() => setActiva(i)}>
+                  <rect
+                    x={x1}
+                    y={y1}
+                    width={x2 - x1}
+                    height={y2 - y1}
+                    fill={d.color}
+                    fillOpacity={i === activa ? 0.25 : 0}
+                    stroke={d.color}
+                    strokeWidth={i === activa ? 4 : 2}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <text
+                    x={x1 + letra * 0.3}
+                    y={y1 + letra}
+                    fontSize={letra}
+                    fontWeight="bold"
+                    fill="white"
+                    stroke="black"
+                    strokeWidth={letra / 8}
+                    paintOrder="stroke"
+                  >
+                    {i + 1}
+                  </text>
+                </g>
+              );
+            })}
+        </svg>
+      </div>
+
+      <div className="space-y-4">
+        <Card>
+          <CardContent className="p-6 space-y-4">
+            <div>
+              <p className="text-sm text-gray-500">Personas</p>
+              <p className="text-4xl font-bold text-gray-900">{resultado.total}</p>
+              <p className="text-sm text-gray-500">{Math.round((resultado.total / salon.capacidad) * 100)}% de la capacidad</p>
+            </div>
+            <ul className="space-y-2">
+              {resultado.roles.map((r) => (
+                <li key={r.rol} className="flex items-center gap-2 text-gray-900">
+                  <span className="w-3 h-3 rounded-full" style={{ backgroundColor: r.color }} aria-hidden />
+                  <span className="flex-1">{r.rol}</span>
+                  <span className="font-semibold tabular-nums">{r.personas}</span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+
+        {detecciones.length > 0 && (
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <p className="flex-1 font-semibold text-gray-900">Recuadros</p>
+                <Button size="sm" variant="outline" onClick={() => onVisibles(detecciones.map(() => true))}>
+                  Todos
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => onVisibles(detecciones.map(() => false))}>
+                  Ninguno
+                </Button>
+              </div>
+              <ul className="max-h-80 overflow-y-auto space-y-1">
+                {detecciones.map((d, i) => (
+                  <li
+                    key={i}
+                    id={`deteccion-${i}`}
+                    onMouseEnter={() => setActiva(i)}
+                    className={cn("rounded-md px-2 py-1", i === activa && "bg-blue-50")}
+                  >
+                    <label className="flex items-center gap-2 text-sm text-gray-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={visibles[i]}
+                        onChange={() => onVisibles(visibles.map((v, j) => (j === i ? !v : v)))}
+                        onFocus={() => setActiva(i)}
+                      />
+                      <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: d.color }} aria-hidden />
+                      <span className="flex-1">
+                        {i + 1}. {d.rol}
+                      </span>
+                      <span className="font-semibold tabular-nums">{Math.round(d.confianza * 100)}%</span>
+                    </label>
+                    {d.objetos.length > 0 && <p className="pl-11 text-xs text-gray-500">Con: {d.objetos.join(", ")}</p>}
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+        )}
+      </div>
     </div>
   );
 }

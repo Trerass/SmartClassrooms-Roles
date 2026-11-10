@@ -4,8 +4,13 @@ import App from "./App";
 
 const RESULTADO = {
   total: 2,
+  ancho: 100,
+  alto: 50,
   roles: [{ rol: "Estudiante", color: "#000000", personas: 2 }],
-  imagen: "data:image/jpeg;base64,AA",
+  detecciones: [
+    { rol: "Estudiante", color: "#000000", confianza: 0.94, caja: [0, 0, 60, 50], objetos: ["laptop"] },
+    { rol: "Estudiante", color: "#000000", confianza: 0.51, caja: [10, 10, 20, 20], objetos: [] },
+  ],
 };
 
 const respuesta = (cuerpo: unknown, status = 200) => new Response(JSON.stringify(cuerpo), { status });
@@ -42,14 +47,54 @@ it("subir una foto no la analiza hasta pulsar Procesar", () => {
   expect(screen.getByRole("img").getAttribute("src")).toBe("blob:foto");
 });
 
-it("procesar muestra la imagen anotada y el conteo", async () => {
+const recuadros = () => [...document.querySelectorAll("svg [data-deteccion]")].map((g) => g.getAttribute("data-deteccion"));
+const casilla = (texto: RegExp) => screen.getByRole("checkbox", { name: texto }) as HTMLInputElement;
+
+async function procesado() {
   fetchFalso.mockResolvedValue(respuesta(RESULTADO));
   elegir();
   fireEvent.click(boton("Procesar"));
-  expect(await screen.findByText("Estudiante")).toBeTruthy();
-  expect(screen.getByRole("img").getAttribute("src")).toBe(RESULTADO.imagen);
+  await screen.findByText("Estudiante");
+}
+
+it("procesar muestra la foto con un recuadro por persona y el conteo", async () => {
+  await procesado();
+  expect(screen.getByRole("img").getAttribute("src")).toBe("blob:foto");
+  expect(document.querySelector("[data-deteccion]")!.closest("svg")!.getAttribute("viewBox")).toBe("0 0 100 50");
+  expect(recuadros()).toEqual(["0", "1"]); // la caja grande va debajo para que la pequeña se pueda seleccionar
   expect(fetchFalso.mock.calls[0][0]).toBe("/analizar");
   expect(botonOpcional("Procesar")).toBeNull();
+});
+
+it("la lista muestra cada persona con su porcentaje y permite elegir cuáles ver", async () => {
+  await procesado();
+  expect(casilla(/1\. Estudiante.*94%/).checked).toBe(true);
+  expect(screen.getByText("Con: laptop")).toBeTruthy();
+
+  fireEvent.click(casilla(/2\. Estudiante.*51%/));
+  expect(recuadros()).toEqual(["0"]);
+
+  fireEvent.click(boton("Ninguno"));
+  expect(recuadros()).toEqual([]);
+  expect(casilla(/1\. Estudiante/).checked).toBe(false);
+
+  fireEvent.click(boton("Todos"));
+  expect(recuadros()).toEqual(["0", "1"]);
+});
+
+it("pulsar un recuadro resalta su fila en la lista", async () => {
+  await procesado();
+  fireEvent.click(document.querySelector('svg [data-deteccion="1"] rect')!);
+  expect(document.getElementById("deteccion-1")!.className).toContain("bg-blue-50");
+  expect(document.getElementById("deteccion-0")!.className).not.toContain("bg-blue-50");
+});
+
+it("la selección de recuadros se guarda por salón", async () => {
+  await procesado();
+  fireEvent.click(boton("Ninguno"));
+  fireEvent.click(salon(/38-102/));
+  fireEvent.click(salon(/38-101/));
+  expect(recuadros()).toEqual([]);
 });
 
 it("quitar borra la foto y el resultado y libera la memoria", async () => {
