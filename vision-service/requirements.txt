@@ -8,9 +8,9 @@ pillow==13.0.0
 scikit-learn==1.9.1
 matplotlib==3.11.2
 ddgs==9.16.1
-requests
-fastapi
-uvicorn
-python-multipart
-httpx
-pi-heif
+requests==2.34.2
+fastapi==0.162.3
+uvicorn==0.54.0
+python-multipart==0.0.33
+httpx==0.28.1
+pi-heif==1.4.0

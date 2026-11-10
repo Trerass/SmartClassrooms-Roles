@@ -47,12 +47,11 @@ export default function App() {
     const archivo = e.target.files?.[0];
     e.target.value = ""; // permite volver a elegir la misma foto
     if (!archivo) return;
-    const destino = salonId; // el usuario puede cambiar de salón mientras se analiza
     setAnalizando(true);
     setError("");
     try {
       const r = await analizar(archivo);
-      setResultados((prev) => ({ ...prev, [destino]: r }));
+      setResultados((prev) => ({ ...prev, [salonId]: r }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -79,7 +78,11 @@ export default function App() {
               key={s.id}
               type="button"
               aria-pressed={s.id === salonId}
-              onClick={() => setSalonId(s.id)}
+              disabled={analizando}
+              onClick={() => {
+                setSalonId(s.id);
+                setError("");
+              }}
               className={cn(
                 "rounded-xl border bg-white p-4 text-left transition-colors",
                 s.id === salonId ? "border-blue-600 ring-1 ring-blue-600" : "border-gray-200 hover:border-gray-400",
