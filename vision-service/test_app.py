@@ -23,6 +23,13 @@ Image.open(io.BytesIO(foto)).resize((277, 277)).save(buf, format="JPEG", quality
 r = client.post("/analizar", files={"foto": ("chica.jpg", buf.getvalue(), "image/jpeg")})
 assert r.json()["total"] == body["total"], r.text
 
+# Salón con 15 estudiantes (varios tapados al fondo) y 1 persona de aseo con su balde.
+aseo = (Path(__file__).parent / "fotos_prueba" / "salon_aseo.webp").read_bytes()
+r = client.post("/analizar", files={"foto": ("aseo.webp", aseo, "image/webp")})
+roles = {x["rol"]: x["personas"] for x in r.json()["roles"]}
+assert r.json()["total"] == 16, roles
+assert roles["Aseo"] == 1, roles
+
 r = client.post("/analizar", files={"foto": ("x.jpg", b"esto no es una imagen", "image/jpeg")})
 assert r.status_code == 400, r.text
 

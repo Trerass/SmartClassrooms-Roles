@@ -535,10 +535,12 @@ def _font(size: int):
 
 # min_side es pequeño a propósito: en fotos de poca resolución las personas del fondo miden 20-40 px.
 def analizar_salon(fuente, yolo, model, class_names, conf_person=0.40, min_conf_role=0.60,
-                   min_side=16, show_objects=True):
+                   min_side=16, show_objects=True, imgsz=960):
     """Detecta personas, clasifica el rol de cada una y devuelve (imagen, detecciones, conteo)."""
     img = cargar_imagen(fuente)
-    res = yolo.predict(img, conf=conf_person, verbose=False)[0]
+    # A 640 px se pierden estudiantes del fondo y una persona con su balde cuenta doble;
+    # 1280 ya inventa personas (ver fotos_prueba/).
+    res = yolo.predict(img, conf=conf_person, imgsz=imgsz, verbose=False)[0]
     boxes = res.boxes.xyxy.cpu().numpy()
     cls = res.boxes.cls.cpu().numpy().astype(int)
 
