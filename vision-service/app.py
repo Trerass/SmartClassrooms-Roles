@@ -21,12 +21,12 @@ if P["yolo_roles"].exists():  # YOLOv8m entrenado con roles reemplaza a las dos 
     def analizar_foto(fuente):
         return rs.analizar_salon_yolo(fuente, roles)
 else:
+    yolo = rs.get_yolo("yolov8m.pt")  # antes que TensorFlow: si no, en Linux chocan sus librerías
     rs.configurar_tf()
     import keras  # noqa: E402  (configurar_tf debe correr antes)
 
     model = keras.saving.load_model(P["modelo"])
     class_names = json.loads(P["clases"].read_text(encoding="utf-8"))
-    yolo = rs.get_yolo("yolov8m.pt")
 
     def analizar_foto(fuente):
         return rs.analizar_salon(fuente, yolo, model, class_names)

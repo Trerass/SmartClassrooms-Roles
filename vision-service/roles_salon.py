@@ -67,6 +67,13 @@ SEARCHES = {
         "estudiantes con cuadernos sentados en el aula",
         "student with backpack and notebook classroom",
         "universitario estudiando en el salón",
+        # Ropa oscura y de pie: sin esto el modelo confunde "camiseta negra" con uniforme de aseo/seguridad.
+        "estudiante universitario camiseta negra exponiendo frente al tablero",
+        "estudiantes de pie presentando proyecto en clase",
+        "university student black t-shirt presenting in front of class",
+        "college students standing giving presentation classroom",
+        "student wearing black hoodie standing in classroom",
+        "estudiante con ropa oscura de pie en el pasillo de la universidad",
     ],
     "persona_aseo": [
         "persona de aseo limpiando salón de clase con trapeadora",
@@ -74,12 +81,24 @@ SEARCHES = {
         "personal de servicios generales limpiando colegio",
         "janitor mopping school classroom",
         "cleaning staff uniform broom school",
+        "auxiliar de aseo con uniforme y carro de limpieza",
+        "operaria de aseo trapeando pasillo universidad",
+        "persona de servicios generales barriendo aula",
+        "school custodian cleaning hallway",
+        "cleaning lady uniform mop bucket office",
+        "janitor portrait uniform cleaning cart",
     ],
     "persona_seguridad": [
         "guardia de seguridad uniforme en colegio",
         "vigilante de seguridad en universidad",
         "security guard uniform school hallway",
         "guardia de seguridad dentro de un salón de clase",
+        "vigilante privado con chaleco en colegio",
+        "guarda de seguridad con radio en universidad",
+        "school security officer standing",
+        "campus security guard portrait",
+        "security guard in school corridor students",
+        "uniformed security guard university entrance",
     ],
 }
 
@@ -119,6 +138,7 @@ def rutas(raiz: str) -> dict:
         "revision": raiz / "revision_yolo",
         "yolo": raiz / "yolo",
         "yolo_roles": raiz / "modelo" / "roles_yolo.pt",
+        "solo_train": raiz / "solo_train.txt",  # fotos de salones reales: siempre a train
     }
 
 
@@ -152,6 +172,10 @@ def get_yolo(weights: str):
     if _YOLO is None:
         from ultralytics import YOLO
         _YOLO = YOLO(weights)
+        # Una predicción de calentamiento ANTES de cargar TensorFlow: en Linux, si PyTorch inicializa
+        # sus librerías después de TF, las dos copias de LLVM chocan y el proceso se cae
+        # ("LLVM ERROR: inconsistency in registered CommandLine options").
+        _YOLO.predict(Image.new("RGB", (64, 64)), verbose=False)
     return _YOLO
 
 
@@ -204,6 +228,8 @@ def cmd_descargar(args):
     seen = {_sha256_bytes(p.read_bytes()) for p in raw.glob("*/*.jpg")}
 
     for clase, queries in SEARCHES.items():
+        if args.clases and clase not in args.clases:
+            continue
         class_dir = raw / clase
         class_dir.mkdir(parents=True, exist_ok=True)
         saved = len(list(class_dir.glob("*.jpg")))
@@ -235,6 +261,8 @@ def cmd_descargar(args):
                     h = _sha256_bytes(data)
                     if h in seen:
                         continue
+                    while (class_dir / f"{saved:04d}.jpg").exists():  # por si se borraron fotos
+                        saved += 1
                     (class_dir / f"{saved:04d}.jpg").write_bytes(data)
                     seen.add(h)
                     saved += 1
@@ -256,18 +284,32 @@ def cmd_recortar(args):
         sys.exit(f"No existe {P['raw']}. Ejecuta primero: python roles_salon.py descargar")
     yolo = get_yolo(args.yolo)
 
-    if P["crops"].exists():
+    # Sin --solo-nuevas se rehace todo y se pierde la revisión a mano.
+    if P["crops"].exists() and not args.solo_nuevas:
         shutil.rmtree(P["crops"])
 
     for class_dir in sorted(P["raw"].iterdir()):
         if not class_dir.is_dir() or class_dir.name not in CLASSES:
             continue
         name = class_dir.name
+        if args.clases and name not in args.clases:
+            continue
         out_dir = P["crops"] / name
         out_dir.mkdir(parents=True, exist_ok=True)
         s = dict(fotos=0, sin_persona=0, ambiguas=0, recortes=0)
+        # procesadas.txt recuerda qué fotos ya pasaron por aquí: si una no tiene recorte, se descartó a mano.
+        registro = out_dir / "procesadas.txt"
+        hechas = set()
+        if args.solo_nuevas and registro.exists():
+            hechas = set(registro.read_text(encoding="utf-8").split())
+        elif args.solo_nuevas:  # carpetas anteriores al registro
+            ultima = max((source_id(f) for f in out_dir.glob("*.jpg")), default="")
+            hechas = {f.stem for f in class_dir.glob("*.jpg") if f.stem <= ultima}
 
         for path in sorted(class_dir.glob("*.jpg")):
+            if path.stem in hechas:
+                continue
+            hechas.add(path.stem)
             s["fotos"] += 1
             with Image.open(path) as im:
                 img = im.convert("RGB")
@@ -286,6 +328,7 @@ def cmd_recortar(args):
                 recortar_con_margen(img, box).save(out_dir / f"{path.stem}__p{k}.jpg",
                                                    format="JPEG", quality=90)
                 s["recortes"] += 1
+        registro.write_text("\n".join(sorted(hechas)) + "\n", encoding="utf-8")
         print(f"{name:20s}", s)
 
     print("\nRecortes por clase:", contar_imagenes(P["crops"]))
@@ -297,13 +340,36 @@ def cmd_recortar(args):
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. Split agrupado por foto de origen (evita data leakage)
 # ──────────────────────────────────────────────────────────────────────────────
+def particion_fija(clase: str, recortes_por_foto: dict) -> dict:
+    """Reparte las fotos de una clase en test/validation/train con el 15/15/70 % de sus RECORTES.
+
+    Las fotos se ordenan por un hash fijo de su nombre y se llenan los grupos en ese orden. Así el
+    reparto no depende del azar: agregar o borrar fotos solo puede mover las que quedan en el límite
+    entre dos grupos, y el test se mantiene casi igual entre entrenamientos.
+    """
+    h = lambda foto: hashlib.sha256(f"{clase}/{foto}".encode()).hexdigest()
+    total = sum(recortes_por_foto.values())
+    grupos, acumulado = {}, 0
+    for foto in sorted(recortes_por_foto, key=h):
+        n = recortes_por_foto[foto]
+        centro = (acumulado + n / 2) / total  # una foto va al grupo donde cae la mitad de sus recortes
+        grupos[foto] = "test" if centro < 0.15 else "validation" if centro < 0.30 else "train"
+        acumulado += n
+    return grupos
+
+
 def cmd_dividir(args):
     P = rutas(args.raiz)
     if not P["crops"].exists():
         sys.exit(f"No existe {P['crops']}. Ejecuta primero: python roles_salon.py recortar")
     if P["split"].exists():
         shutil.rmtree(P["split"])
-    rng = random.Random(SEED)
+    # Fotos que van siempre a train (p. ej. salones reales, escasos frente a los de internet).
+    # Una línea por foto con la forma 'clase/foto', por ejemplo 'estudiante/0133'.
+    solo_train = set()
+    if P["solo_train"].exists():
+        solo_train = {l.strip() for l in P["solo_train"].read_text(encoding="utf-8").splitlines()
+                      if l.strip() and not l.startswith("#")}
 
     for class_dir in sorted(P["crops"].iterdir()):
         if not class_dir.is_dir():
@@ -312,15 +378,12 @@ def cmd_dividir(args):
         for f in class_dir.glob("*.jpg"):
             groups[source_id(f)].append(f)
 
-        keys = sorted(groups)
-        rng.shuffle(keys)
-        n = len(keys)
-        n_train, n_val = int(n * 0.70), int(n * 0.15)
-        split_keys = {
-            "train": keys[:n_train],
-            "validation": keys[n_train:n_train + n_val],
-            "test": keys[n_train + n_val:],
-        }
+        split_keys = {"train": [], "validation": [], "test": []}
+        forzadas = {k for k in groups if f"{class_dir.name}/{k}" in solo_train}
+        reparto = particion_fija(class_dir.name, {k: len(v) for k, v in groups.items() if k not in forzadas})
+        reparto.update({k: "train" for k in forzadas})
+        for k in sorted(groups):
+            split_keys[reparto[k]].append(k)
         for split_name, ks in split_keys.items():
             target = P["split"] / split_name / class_dir.name
             target.mkdir(parents=True, exist_ok=True)
@@ -399,6 +462,14 @@ def plot_history(h, title="", save_path=None, mostrar=False):
     plt.close(fig)
 
 
+def intervalo_bootstrap(y_true, y_pred, n: int = 2000, seed: int = SEED):
+    """IC del 95 % de la accuracy remuestreando el test: con un test pequeño, la nota tiene margen de error."""
+    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    rng = np.random.default_rng(seed)
+    accs = [np.mean(y_true[i] == y_pred[i]) for i in (rng.integers(0, len(y_true), len(y_true)) for _ in range(n))]
+    return float(np.percentile(accs, 2.5)), float(np.percentile(accs, 97.5))
+
+
 def evaluar(model, dataset, class_names, titulo, png_path, mostrar=False):
     import matplotlib.pyplot as plt
     from sklearn.metrics import (ConfusionMatrixDisplay, classification_report,
@@ -409,7 +480,8 @@ def evaluar(model, dataset, class_names, titulo, png_path, mostrar=False):
     acc = float((y_true == y_pred).mean())
     f1 = float(f1_score(y_true, y_pred, average="macro"))
 
-    print(f"\n--- {titulo} ---  accuracy={acc:.4f}  F1 macro={f1:.4f}")
+    lo, hi = intervalo_bootstrap(y_true, y_pred)
+    print(f"\n--- {titulo} ---  accuracy={acc:.4f} (IC 95 %: {lo:.3f}-{hi:.3f})  F1 macro={f1:.4f}")
     print(classification_report(y_true, y_pred, target_names=class_names, digits=3, zero_division=0))
 
     cm = confusion_matrix(y_true, y_pred, labels=range(len(class_names)))
@@ -617,11 +689,11 @@ def cmd_contar(args):
         sys.exit(f"No encuentro el modelo ({modelo_path}) o las clases ({clases_path}).\n"
                  "Entrena primero con 'entrenar' o indica --modelo y --clases.")
 
+    yolo = get_yolo(args.yolo)  # antes que TensorFlow (ver get_yolo)
     configurar_tf()
     import keras
     model = keras.saving.load_model(modelo_path)
     class_names = json.loads(clases_path.read_text(encoding="utf-8"))
-    yolo = get_yolo(args.yolo)
 
     salida = Path(args.salida)
     salida.mkdir(parents=True, exist_ok=True)
@@ -780,12 +852,12 @@ def cmd_comparar(args):
     if not pesos.exists() or not (P["yolo"] / "images" / "test").exists():
         sys.exit(f"Faltan los pesos ({pesos}) o el dataset. Ejecuta dividir-yolo y entrena primero.")
 
+    from ultralytics import YOLO
+    yolo, roles = get_yolo(args.yolo), YOLO(pesos)  # antes que TensorFlow (ver get_yolo)
     configurar_tf()
     import keras
-    from ultralytics import YOLO
     model = keras.saving.load_model(P["modelo"])
     class_names = json.loads(P["clases"].read_text(encoding="utf-8"))
-    yolo, roles = get_yolo(args.yolo), YOLO(pesos)
     validar_clases(roles.names)
     metodos = {"Dos etapas": lambda f: analizar_salon(f, yolo, model, class_names),
                "YOLO con roles": lambda f: analizar_salon_yolo(f, roles)}
@@ -816,11 +888,15 @@ def main():
 
     p = sub.add_parser("descargar", help="Descarga fotos de la web por clase.")
     p.add_argument("--por-busqueda", type=int, default=50)
+    p.add_argument("--clases", nargs="+", choices=CLASSES, help="Solo estas clases.")
     p.set_defaults(func=cmd_descargar)
 
     p = sub.add_parser("recortar", help="YOLO detecta personas y las recorta.")
     p.add_argument("--conf", type=float, default=0.40)
     p.add_argument("--min-lado", type=int, default=96)
+    p.add_argument("--clases", nargs="+", choices=CLASSES, help="Solo estas clases.")
+    p.add_argument("--solo-nuevas", action="store_true",
+                   help="Recorta solo las fotos nuevas y conserva los recortes ya revisados.")
     p.set_defaults(func=cmd_recortar)
 
     p = sub.add_parser("dividir", help="Split train/validation/test agrupado por foto.")
