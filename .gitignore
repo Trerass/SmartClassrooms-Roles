@@ -9,3 +9,4 @@ vision-service/data_roles/*
 !vision-service/data_roles/solo_train.txt
 vision-service/data_roles/modelo/pesos_base_congelada.weights.h5
 .env
+vision-service/casos_agente_salida.md

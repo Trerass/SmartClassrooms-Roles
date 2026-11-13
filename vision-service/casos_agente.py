@@ -1,6 +1,7 @@
-"""Corre los cinco casos de prueba del agente y guarda lo ocurrido en casos_agente.md.
+"""Corre los cinco casos de prueba del agente y guarda lo ocurrido en casos_agente_salida.md.
 
 Necesita la clave del modelo (NVIDIA_API_KEY en el entorno o en .env). Ejecutar: python casos_agente.py
+casos_agente.md (con las valoraciones escritas a mano) no se toca: se compara a mano con la salida.
 
 Escenario fijo: 38-101 = fotos_prueba/salon_aseo.webp, 38-102 = foto_salon.jpg, 38-201 sin foto.
 """
@@ -51,8 +52,8 @@ def main():
                    f"`{json.dumps(p['resultado'], ensure_ascii=False)}`" for j, p in enumerate(r["pasos"], 1)] or ["(ninguna)"]
         lineas += ["", f"**Respuesta:** {r['respuesta']}\n", "**Valoración:** _(completar a mano)_\n"]
         print(f"Caso {i}: {len(r['pasos'])} herramientas → {r['respuesta'][:100]}")
-    (AQUI / "casos_agente.md").write_text("\n".join(lineas) + "\n", encoding="utf-8")
-    print("\nGuardado en casos_agente.md")
+    (AQUI / "casos_agente_salida.md").write_text("\n".join(lineas) + "\n", encoding="utf-8")
+    print("\nGuardado en casos_agente_salida.md")
 
 
 if __name__ == "__main__":

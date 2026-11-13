@@ -45,7 +45,7 @@ Reglas:
 - Las personas "indeterminadas" son personas cuyo rol el modelo no pudo decidir: cuéntalas en el total,
   pero no las asignes a ningún rol.
 - Si la pregunta no trata sobre los salones, di que solo puedes responder sobre su ocupación.
-- Responde en español, en pocas frases."""
+- Responde en español, en pocas frases y en texto plano: sin Markdown (nada de asteriscos, viñetas ni encabezados), porque el chat lo muestra tal cual."""
 
 
 # ──────────────────────────────────────────────────────────────────────────────

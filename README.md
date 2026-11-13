@@ -2,7 +2,7 @@
 
 **Integrantes:** Jerónimo Contreras, Cristian Bolaños, Miguel Bernal
 **Curso:** SI3003 Inteligencia Artificial, Universidad EAFIT
-**Fecha:** 17 de noviembre de 2026
+**Fecha:** 13 de noviembre de 2026
 **Opción elegida:** B, agente con herramientas
 
 ## 1. Introducción
@@ -163,7 +163,7 @@ Escenario fijo:
 - **38-102:** `foto_salon.jpg`. Detecta 5 personas: 4 estudiantes y 1 de aseo.
 - **38-201:** sin foto.
 
-Se ejecutan con `python casos_agente.py`, que deja el detalle completo (herramientas, argumentos, resultados y respuesta) en `vision-service/casos_agente.md`. La evaluación es manual.
+Se ejecutan con `python casos_agente.py`, que deja el detalle completo (herramientas, argumentos, resultados y respuesta) en `vision-service/casos_agente_salida.md`, sin tocar `casos_agente.md`, donde están las valoraciones hechas a mano. La evaluación es manual.
 
 | # | Tipo | Pregunta | Resultado esperado | Herramientas llamadas | Respuesta obtenida | Valoración |
 |---|---|---|---|---|---|---|
@@ -277,7 +277,7 @@ Se abre con el kernel de `.venv` (`pip install ipykernel` si hace falta).
 
 ```bash
 python agente.py --foto 38-101=fotos_prueba/salon_aseo.webp "¿Qué tan lleno está el 38-101?"
-python casos_agente.py     # los 5 casos de prueba → casos_agente.md
+python casos_agente.py     # los 5 casos de prueba → casos_agente_salida.md
 ```
 
 **Dataset:** no está en el repositorio porque son imágenes de terceros. Para reentrenar, descomprime `SmartClassrooms_escenas.zip` y `SmartClassrooms_recortes.zip` (los comparte el equipo) dentro de `vision-service`, y ejecuta `python roles_salon.py dividir`. Para usar la página y el agente no hace falta: el clasificador entrenado sí está en el repositorio.
