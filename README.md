@@ -1,6 +1,6 @@
 # SmartClassrooms Roles: agente de ocupación de salones
 
-**Integrantes:** [Nombre completo 1], [Nombre completo 2]
+**Integrantes:** Jerónimo Contreras, Cristian Bolaños, Miguel Bernal
 **Curso:** SI3003 Inteligencia Artificial, Universidad EAFIT
 **Fecha:** 17 de noviembre de 2026
 **Opción elegida:** B, agente con herramientas
@@ -41,11 +41,11 @@ Los datos son los del **clasificador de roles**, la herramienta de visión del a
 
 | | Estudiante | Aseo | Seguridad | Total |
 |---|---|---|---|---|
-| Fotos descargadas (`escenas/`) | 384 | 374 | 310 | 1.068 |
-| Recortes revisados (`recortes/`) | 304 | 237 | 204 | 745 |
-| Train / validation / test | 215 / 45 / 44 | 166 / 35 / 36 | 143 / 30 / 31 | 524 / 110 / 111 |
+| Fotos descargadas (`escenas/`) | 387 | 374 | 317 | 1.078 |
+| Recortes revisados (`recortes/`) | 306 | 237 | 211 | 754 |
+| Train / validation / test | 217 / 45 / 44 | 166 / 35 / 36 | 150 / 30 / 31 | 533 / 110 / 111 |
 
-- **Fuente:** imágenes públicas de internet obtenidas con búsquedas en español e inglés por rol (`SEARCHES` en `roles_salon.py`, buscador DuckDuckGo). Para estudiantes se agregaron búsquedas de universitarios de pie y con ropa oscura (ver Resultados). A estas se sumaron 5 fotos de guardias elegidas a mano y una foto de un salón real de EAFIT.
+- **Fuente:** imágenes públicas de internet obtenidas con búsquedas en español e inglés por rol (`SEARCHES` en `roles_salon.py`, buscador DuckDuckGo). Para estudiantes se agregaron búsquedas de universitarios de pie y con ropa oscura (ver Resultados). A estas se sumaron 7 fotos de guardias elegidas a mano y fotos de salones reales.
 - **Formato:** JPG RGB. Cada recorte contiene a una persona y se redimensiona a 224×224. La clase es el nombre de la carpeta.
 - **Preprocesamiento:**
   1. YOLOv8m detecta a las personas de cada foto y las recorta con un margen del 8 %.
@@ -196,14 +196,16 @@ Todos los resultados son del conjunto de test: 111 recortes de fotos que el mode
 | Modelo | Accuracy (IC 95 %) | F1 macro |
 |---|---|---|
 | Clase mayoritaria (siempre "estudiante") | 0,396 | 0,189 |
-| Línea base: EfficientNetB0 congelado | 0,892 (0,829–0,946) | 0,893 |
-| **Fine-tuning (modelo final)** | **0,919 (0,865–0,964)** | **0,919** |
+| Línea base: EfficientNetB0 congelado | 0,901 | 0,901 |
+| **Fine-tuning (modelo final)** | **0,910 (0,856–0,964)** | **0,911** |
 
 | Clase | Precision | Recall | F1 |
 |---|---|---|---|
-| Estudiante | 0,974 | 0,864 | 0,916 |
-| Aseo | 0,917 | 0,917 | 0,917 |
+| Estudiante | 0,974 | 0,841 | 0,902 |
+| Aseo | 0,892 | 0,917 | 0,904 |
 | Seguridad | 0,861 | 1,000 | 0,925 |
+
+El modelo final se midió otra vez con `clasificador_roles.keras` sobre este test, y coincide con su matriz de confusión guardada (Figura 3). La línea base sale de `confusion_antes.png`; sus pesos no se suben al repositorio.
 
 ![Matriz de confusión después del fine-tuning](vision-service/data_roles/modelo/confusion_despues.png)
 *Figura 3. Matriz de confusión del modelo final en test.*
@@ -221,12 +223,13 @@ Todos los resultados son del conjunto de test: 111 recortes de fotos que el mode
   | Partición fija 70/15/15 por recortes | El test cambiaba en cada entrenamiento y las notas no se podían comparar |
   | Quitar niños de colegio y agregar universitarios de pie y con ropa oscura | El modelo había aprendido que "de pie, de cuerpo entero o con ropa oscura" significa personal, y en un salón real confundía a estudiantes que exponían frente al tablero con aseo |
 
-  El modelo original obtuvo 0,797 de accuracy sobre otro test (74 recortes), así que esa comparación es solo orientativa. Con un test casi igual al actual, agregar 20 universitarios más y corregir dos etiquetas de seguridad subió la accuracy de 0,864 a 0,919.
-- **El fine-tuning aporta una mejora moderada.** Sube la accuracy de 0,892 a 0,919 (3 recortes más) y baja la `val_loss` de 0,157 a 0,134, pero los intervalos de confianza se solapan.
-- **Errores que quedan:** son 9 de 111.
-  - **Estudiantes llamados personal:** 6 de 44, tres como aseo y tres como seguridad. Casi siempre son personas de pie o de espaldas con chaqueta oscura.
-  - **Aseo sin uniforme:** 3 de 36. Son personas limpiando con ropa de calle, que solo se distinguen por lo que hacen.
+  El modelo original obtuvo 0,797 de accuracy sobre otro test (74 recortes), así que esa comparación es solo orientativa.
+- **El fine-tuning aporta poco.** Sube la accuracy de 0,901 a 0,910, un recorte más. En las curvas, la `val_loss` baja de ≈ 0,15 al final de la fase 1 a ≈ 0,13 al final de la fase 2.
+- **Errores que quedan:** son 10 de 111.
+  - **Estudiantes llamados personal:** 7 de 44, cuatro como aseo y tres como seguridad. Casi siempre son personas de pie o de espaldas con chaqueta oscura.
+  - **Aseo confundido:** 3 de 36, dos como seguridad y uno como estudiante. Son sobre todo personas limpiando con ropa de calle, que solo se distinguen por lo que hacen.
   - **Seguridad** encuentra a todos los guardias (31 de 31), pero 5 de las 36 veces que dice "seguridad" se equivoca.
+- **Umbral de 0,60:** 102 de los 111 recortes lo superan, y en ellos la accuracy es 0,951. Los otros 9 se contarían como "indeterminado".
 - **Limitaciones:**
   - El test es pequeño: con unos 35 recortes por clase, un error cambia el recall en unos 3 puntos. Una validación cruzada (k-fold) daría una estimación más estable.
   - Los datos vienen de internet y no de salones reales, así que el desempeño en un salón real puede ser menor.
@@ -265,6 +268,8 @@ python agente.py --foto 38-101=fotos_prueba/salon_aseo.webp "¿Qué tan lleno es
 python casos_agente.py     # los 5 casos de prueba → casos_agente.md
 ```
 
+**Dataset:** no está en el repositorio porque son imágenes de terceros. Para reentrenar, descomprime `SmartClassrooms_escenas.zip` y `SmartClassrooms_recortes.zip` (los comparte el equipo) dentro de `vision-service`, y ejecuta `python roles_salon.py dividir`. Para usar la página y el agente no hace falta: el clasificador entrenado sí está en el repositorio.
+
 **Reentrenar el clasificador**, dentro de `vision-service` y con el entorno activado:
 
 ```bash
@@ -282,6 +287,10 @@ python roles_salon.py entrenar       # fases 1 y 2, métricas y gráficas en dat
 - `python test_app.py`: usa los modelos reales.
 
 En `frontend`, `pnpm test`. GitHub Actions corre las rápidas en cada push.
+
+**En Windows:** si `pip install` falla por rutas demasiado largas, crea el entorno en una ruta corta (por ejemplo `C:\venvs\salones`). Si `roles_salon.py` falla con `UnicodeEncodeError`, ejecuta antes `$env:PYTHONIOENCODING="utf-8"`.
+
+La documentación completa está en la [wiki](https://github.com/Trerass/SmartClassrooms-Roles/wiki): instalación, agente, arquitectura, API, redes neuronales y limitaciones.
 
 **Estructura del repositorio:**
 
