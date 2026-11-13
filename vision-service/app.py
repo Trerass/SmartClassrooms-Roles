@@ -14,24 +14,17 @@ import roles_salon as rs
 MAX_BYTES = 15 * 1024 * 1024
 P = rs.rutas(Path(__file__).parent / "data_roles")
 
-if P["yolo_roles"].exists():  # YOLOv8m entrenado con roles reemplaza a las dos etapas
-    from ultralytics import YOLO
+yolo = rs.get_yolo("yolov8m.pt")  # antes que TensorFlow: si no, en Linux chocan sus librerías
+rs.configurar_tf()
+import keras  # noqa: E402  (configurar_tf debe correr antes)
 
-    roles = YOLO(P["yolo_roles"])
-    rs.validar_clases(roles.names)
+model = keras.saving.load_model(P["modelo"])
+class_names = json.loads(P["clases"].read_text(encoding="utf-8"))
 
-    def analizar_foto(fuente):
-        return rs.analizar_salon_yolo(fuente, roles)
-else:
-    yolo = rs.get_yolo("yolov8m.pt")  # antes que TensorFlow: si no, en Linux chocan sus librerías
-    rs.configurar_tf()
-    import keras  # noqa: E402  (configurar_tf debe correr antes)
 
-    model = keras.saving.load_model(P["modelo"])
-    class_names = json.loads(P["clases"].read_text(encoding="utf-8"))
+def analizar_foto(fuente):
+    return rs.analizar_salon(fuente, yolo, model, class_names)
 
-    def analizar_foto(fuente):
-        return rs.analizar_salon(fuente, yolo, model, class_names)
 
 app = FastAPI(title="Roles en salón")
 

@@ -1,36 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Lógica del taller de transfer learning, en dos etapas:
+Visión del proyecto: cómo se arma el dataset, cómo se entrena el clasificador y cómo se
+analiza la foto de un salón.
 
-    Foto ──► [1] YOLOv8 (preentrenado, detecta "persona")
+    Foto ──► YOLOv8m (preentrenado, detecta "persona")
          ──► recorte por persona
-         ──► [2] EfficientNetB0 + transfer learning (estudiante / persona_aseo / persona_seguridad)
-         ──► conteo por rol + imagen anotada
+         ──► EfficientNetB0 + transfer learning (estudiante / persona_aseo / persona_seguridad)
+         ──► conteo por rol  (lo usa la API y, a través de ella, el agente)
 
-Flujo de uso (cada paso es un subcomando):
+Para reentrenar (cada paso es un subcomando):
 
-    python roles_salon.py descargar     # 1. baja fotos de la web (por clase)
-    python roles_salon.py recortar      # 2. YOLO recorta cada persona
+    python roles_salon.py descargar     # 1. baja fotos de la web por clase
+    python roles_salon.py recortar      # 2. YOLO recorta cada persona (--solo-nuevas para fotos nuevas)
     #   >>> REVISA A MANO data_roles/recortes/ y borra los recortes incorrectos <<<
-    python roles_salon.py dividir       # 3. train / validation / test (agrupado por foto)
-    python roles_salon.py entrenar      # 4. base congelada + fine-tuning + evaluación
-    python roles_salon.py contar foto_salon.jpg   # 5. cuenta personas por rol
-
-Alternativa: YOLOv8m entrenado directamente con los tres roles (ver README):
-
-    python roles_salon.py etiquetar     # cajas automáticas y fotos para revisar
-    #   >>> REVISA A MANO data_roles/revision_yolo/ y borra las fotos mal etiquetadas <<<
-    python roles_salon.py dividir-yolo  # dataset en formato YOLO + data.yaml
-    yolo detect train model=yolov8m.pt data=data_roles/yolo/data.yaml ...
-    python roles_salon.py comparar      # dos etapas vs. YOLO con roles
-    python roles_salon.py contar salon.jpg --mostrar
-
-Si ya tienes un modelo entrenado (clasificador_roles.keras + class_names.json),
-solo necesitas el paso 5.
-
-Dependencias:
-    pip install -U ddgs ultralytics tensorflow keras scikit-learn matplotlib pillow requests numpy
+    python roles_salon.py dividir       # 3. train / validation / test fijo, agrupado por foto
+    python roles_salon.py entrenar      # 4. base congelada + fine-tuning + métricas y gráficas
 """
 from __future__ import annotations
 
@@ -134,11 +119,7 @@ def rutas(raiz: str) -> dict:
         "modelo": raiz / "modelo" / "clasificador_roles.keras",
         "clases": raiz / "modelo" / "class_names.json",
         "pesos_base": raiz / "modelo" / "pesos_base_congelada.weights.h5",
-        "etiquetas": raiz / "etiquetas_yolo",
-        "revision": raiz / "revision_yolo",
-        "yolo": raiz / "yolo",
-        "yolo_roles": raiz / "modelo" / "roles_yolo.pt",
-        "solo_train": raiz / "solo_train.txt",  # fotos de salones reales: siempre a train
+        "solo_train": raiz / "solo_train.txt",  # fotos que van siempre a train
     }
 
 
@@ -154,13 +135,8 @@ def source_id(path) -> str:
     return Path(path).name.split("__p")[0]
 
 
-def cargar_imagen(fuente: str) -> Image.Image:
-    if str(fuente).startswith("http"):
-        import requests
-        r = requests.get(fuente, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        return ImageOps.exif_transpose(Image.open(io.BytesIO(r.content))).convert("RGB")
-    # Las fotos de celular guardan la rotación en EXIF.
+def cargar_imagen(fuente) -> Image.Image:
+    """Ruta o archivo en memoria. Las fotos de celular guardan la rotación en EXIF."""
     return ImageOps.exif_transpose(Image.open(fuente)).convert("RGB")
 
 
@@ -591,7 +567,7 @@ def cmd_entrenar(args):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Inferencia: contar personas por rol en una imagen de salón
+# 5. Análisis de una foto: lo que usa la API
 # ──────────────────────────────────────────────────────────────────────────────
 def _font(size: int):
     for name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "Arial.ttf"):
@@ -681,204 +657,6 @@ def dibujar_resultados(img: Image.Image, detections, conteo) -> Image.Image:
     return canvas
 
 
-def cmd_contar(args):
-    P = rutas(args.raiz)
-    modelo_path = Path(args.modelo) if args.modelo else P["modelo"]
-    clases_path = Path(args.clases) if args.clases else P["clases"]
-    if not modelo_path.exists() or not clases_path.exists():
-        sys.exit(f"No encuentro el modelo ({modelo_path}) o las clases ({clases_path}).\n"
-                 "Entrena primero con 'entrenar' o indica --modelo y --clases.")
-
-    yolo = get_yolo(args.yolo)  # antes que TensorFlow (ver get_yolo)
-    configurar_tf()
-    import keras
-    model = keras.saving.load_model(modelo_path)
-    class_names = json.loads(clases_path.read_text(encoding="utf-8"))
-
-    salida = Path(args.salida)
-    salida.mkdir(parents=True, exist_ok=True)
-    resultados = []
-
-    for fuente in args.imagenes:
-        try:
-            img, dets, conteo = analizar_salon(
-                fuente, yolo, model, class_names,
-                conf_person=args.conf_persona, min_conf_role=args.min_conf_rol,
-                min_side=args.min_lado, show_objects=not args.sin_objetos)
-        except Exception as e:
-            print(f"[ERROR] {fuente}: {e}")
-            continue
-
-        print(f"\nImagen: {fuente}")
-        print(f"  Personas detectadas: {len(dets)}")
-        for rol, n in conteo.items():
-            if rol != "indeterminado" or n > 0:
-                print(f"  {ROLE_LABELS.get(rol, rol):14s}: {n}")
-
-        nombre = Path(str(fuente).split("?")[0]).stem or "imagen"
-        out_path = salida / f"{nombre}_roles.jpg"
-        anotada = dibujar_resultados(img, dets, conteo)
-        anotada.save(out_path, quality=92)
-        print(f"  Imagen anotada: {out_path}")
-        if args.mostrar:
-            anotada.show()
-
-        resultados.append(dict(imagen=str(fuente), total=len(dets), conteo=dict(conteo),
-                               detecciones=dets, imagen_anotada=str(out_path)))
-
-    if args.json and resultados:
-        json_path = salida / "resultados.json"
-        json_path.write_text(json.dumps(resultados, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\nResultados guardados en {json_path}")
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 6. YOLOv8m con roles: auto-etiquetado, dataset e inferencia
-# ──────────────────────────────────────────────────────────────────────────────
-def linea_yolo(box, ancho, alto, clase_id) -> str:
-    """Caja xyxy en píxeles -> 'clase cx cy w h' normalizado (formato de etiquetas YOLO)."""
-    x1, y1, x2, y2 = [float(v) for v in box]
-    return (f"{clase_id} {(x1 + x2) / 2 / ancho:.6f} {(y1 + y2) / 2 / alto:.6f} "
-            f"{(x2 - x1) / ancho:.6f} {(y2 - y1) / alto:.6f}")
-
-
-def validar_clases(nombres):
-    """Evita activar unos pesos que no se entrenaron con los tres roles."""
-    if set(nombres.values()) != set(CLASSES):
-        sys.exit(f"Los pesos tienen las clases {sorted(nombres.values())}, se esperaban {CLASSES}.")
-
-
-def cmd_etiquetar(args):
-    P = rutas(args.raiz)
-    if not P["raw"].exists():
-        sys.exit(f"No existe {P['raw']}. Ejecuta primero: python roles_salon.py descargar")
-    yolo = get_yolo(args.yolo)
-
-    for clase_id, name in enumerate(CLASSES):
-        lab_dir, rev_dir = P["etiquetas"] / name, P["revision"] / name
-        lab_dir.mkdir(parents=True, exist_ok=True)
-        rev_dir.mkdir(parents=True, exist_ok=True)
-        # Una foto que ya pasó por 'recortar' y no tiene recortes se descartó a mano.
-        con_recorte = {source_id(f) for f in (P["crops"] / name).glob("*.jpg")}
-        registro = P["crops"] / name / "procesadas.txt"
-        if registro.exists():
-            procesadas = set(registro.read_text(encoding="utf-8").split())
-        else:  # carpetas anteriores al registro
-            ultima = max((k for k in con_recorte if k.isdigit()), default="")
-            procesadas = {f.stem for f in (P["raw"] / name).glob("*.jpg") if f.stem <= ultima}
-        s = dict(nuevas=0, sin_persona=0, ambiguas=0, descartadas=0, ilegibles=0)
-
-        for path in sorted((P["raw"] / name).glob("*.jpg")):
-            # Es incremental: volver a ejecutarlo no deshace lo que ya se revisó.
-            if (lab_dir / f"{path.stem}.txt").exists():
-                continue
-            if path.stem in procesadas and path.stem not in con_recorte:
-                s["descartadas"] += 1
-                continue
-            try:
-                with Image.open(path) as im:
-                    img = im.convert("RGB")
-            except Exception:  # un archivo dañado no debe detener todo el etiquetado
-                s["ilegibles"] += 1
-                continue
-            boxes, _ = detectar_personas(yolo, img, args.conf)
-            if len(boxes) == 0:
-                s["sin_persona"] += 1
-                continue
-            if len(boxes) > MAX_PERSONS_IN_IMAGE[name]:
-                s["ambiguas"] += 1
-                continue
-            # Se etiqueta a TODAS las personas: una sin etiqueta le enseña a YOLO que es fondo.
-            lineas = [linea_yolo(b, img.width, img.height, clase_id) for b in boxes]
-            (lab_dir / f"{path.stem}.txt").write_text("\n".join(lineas) + "\n", encoding="utf-8")
-            draw = ImageDraw.Draw(img)
-            for b in boxes:
-                draw.rectangle([float(v) for v in b], outline="#ff0000", width=max(2, img.width // 200))
-            img.save(rev_dir / path.name, format="JPEG", quality=85)
-            s["nuevas"] += 1
-        print(f"{name:20s}", s)
-
-    print("\nPara revisar:", contar_imagenes(P["revision"]))
-    print(f">>> Revisa {P['revision']} y borra las fotos con cajas o personas que no correspondan")
-    print("    (p. ej. un profesor en estudiante, o un estudiante en persona_aseo). Luego: dividir-yolo")
-
-
-def cmd_dividir_yolo(args):
-    P = rutas(args.raiz)
-    if not P["revision"].exists():
-        sys.exit(f"No existe {P['revision']}. Ejecuta primero: python roles_salon.py etiquetar")
-    if not any(P["revision"].glob("*/*.jpg")):
-        sys.exit(f"No quedan fotos en {P['revision']}: no se cambió el dataset.")
-    if P["yolo"].exists():
-        shutil.rmtree(P["yolo"])
-    rng = random.Random(SEED)
-
-    for name in CLASSES:
-        stems = sorted(f.stem for f in (P["revision"] / name).glob("*.jpg"))
-        rng.shuffle(stems)
-        n_train, n_val = int(len(stems) * 0.70), int(len(stems) * 0.15)
-        partes = {"train": stems[:n_train], "val": stems[n_train:n_train + n_val],
-                  "test": stems[n_train + n_val:]}
-        for split, ks in partes.items():
-            (P["yolo"] / "images" / split).mkdir(parents=True, exist_ok=True)
-            (P["yolo"] / "labels" / split).mkdir(parents=True, exist_ok=True)
-            for k in ks:
-                # Los números de foto se repiten entre clases: el prefijo evita colisiones.
-                shutil.copy2(P["raw"] / name / f"{k}.jpg", P["yolo"] / "images" / split / f"{name}_{k}.jpg")
-                shutil.copy2(P["etiquetas"] / name / f"{k}.txt", P["yolo"] / "labels" / split / f"{name}_{k}.txt")
-        print(f"{name:20s}", {k: len(v) for k, v in partes.items()})
-
-    # Sin 'path': Ultralytics usa la carpeta del yaml, así funciona igual aquí y en Colab.
-    nombres = "\n".join(f"  {i}: {c}" for i, c in enumerate(CLASSES))
-    (P["yolo"] / "data.yaml").write_text(
-        f"train: images/train\nval: images/val\ntest: images/test\nnames:\n{nombres}\n", encoding="utf-8")
-    print("\nDataset listo en", P["yolo"])
-
-
-def analizar_salon_yolo(fuente, yolo_roles, conf_person=0.25, min_conf_role=0.50):
-    """Igual que analizar_salon, pero YOLO da la caja y el rol en un solo paso."""
-    img = cargar_imagen(fuente)
-    # agnostic_nms: la misma persona no puede contarse con dos roles.
-    res = yolo_roles.predict(img, conf=conf_person, agnostic_nms=True, verbose=False)[0]
-    detections = []
-    for box, c, p in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy(), res.boxes.conf.cpu().numpy()):
-        # Con poca confianza la persona sigue contando, sin rol: no baja el total.
-        role = yolo_roles.names[int(c)] if p >= min_conf_role else "indeterminado"
-        detections.append(dict(box=[float(v) for v in box], role=role, conf=float(p), objects=[]))
-    conteo = Counter({r: 0 for r in [*CLASSES, "indeterminado"]})
-    conteo.update(d["role"] for d in detections)
-    return img, detections, conteo
-
-
-def cmd_comparar(args):
-    """Error de rol por foto en test. El total no se compara: las cajas de test salen del detector de las dos etapas."""
-    P = rutas(args.raiz)
-    pesos = Path(args.pesos) if args.pesos else P["yolo_roles"]
-    if not pesos.exists() or not (P["yolo"] / "images" / "test").exists():
-        sys.exit(f"Faltan los pesos ({pesos}) o el dataset. Ejecuta dividir-yolo y entrena primero.")
-
-    from ultralytics import YOLO
-    yolo, roles = get_yolo(args.yolo), YOLO(pesos)  # antes que TensorFlow (ver get_yolo)
-    configurar_tf()
-    import keras
-    model = keras.saving.load_model(P["modelo"])
-    class_names = json.loads(P["clases"].read_text(encoding="utf-8"))
-    validar_clases(roles.names)
-    metodos = {"Dos etapas": lambda f: analizar_salon(f, yolo, model, class_names),
-               "YOLO con roles": lambda f: analizar_salon_yolo(f, roles)}
-
-    errores = defaultdict(list)
-    for img in sorted((P["yolo"] / "images" / "test").glob("*.jpg")):
-        lineas = (P["yolo"] / "labels" / "test" / f"{img.stem}.txt").read_text(encoding="utf-8").splitlines()
-        real = Counter(CLASSES[int(l.split()[0])] for l in lineas)
-        for nombre, analizar in metodos.items():
-            _, _, conteo = analizar(img)
-            errores[nombre].append(sum(abs(conteo[r] - real[r]) for r in CLASSES))
-
-    for nombre, e in errores.items():
-        print(f"{nombre:16s} error medio de rol por foto: {np.mean(e):.3f}  (fotos: {len(e)})")
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
@@ -915,34 +693,6 @@ def main():
     p.add_argument("--mostrar-graficas", action="store_true",
                    help="Mostrar las ventanas de gráficas de accuracy/loss y matrices de confusión.")
     p.set_defaults(func=cmd_entrenar)
-
-    p = sub.add_parser("contar", help="Cuenta personas por rol en una o varias imágenes.")
-    p.add_argument("imagenes", nargs="+", help="Rutas o URLs de imágenes de salones.")
-    p.add_argument("--modelo", help="Ruta al .keras (por defecto, el entrenado en --raiz).")
-    p.add_argument("--clases", help="Ruta al class_names.json.")
-    p.add_argument("--salida", default="resultados", help="Carpeta para las imágenes anotadas.")
-    p.add_argument("--conf-persona", type=float, default=0.40,
-                   help="Más alto = menos falsos positivos de persona.")
-    p.add_argument("--min-conf-rol", type=float, default=0.60,
-                   help="Más alto = más personas marcadas como 'indeterminado'.")
-    p.add_argument("--min-lado", type=int, default=16,
-                   help="Lado mínimo (px) de una persona para considerarla.")
-    p.add_argument("--sin-objetos", action="store_true",
-                   help="No mostrar mochila/bolso/laptop/libro como evidencia.")
-    p.add_argument("--json", action="store_true", help="Guardar resultados.json.")
-    p.add_argument("--mostrar", action="store_true", help="Abrir la imagen anotada.")
-    p.set_defaults(func=cmd_contar)
-
-    p = sub.add_parser("etiquetar", help="Cajas automáticas por clase y fotos para revisar.")
-    p.add_argument("--conf", type=float, default=0.40)
-    p.set_defaults(func=cmd_etiquetar)
-
-    p = sub.add_parser("dividir-yolo", help="Dataset en formato YOLO a partir de las fotos revisadas.")
-    p.set_defaults(func=cmd_dividir_yolo)
-
-    p = sub.add_parser("comparar", help="Compara las dos etapas con YOLO entrenado con roles.")
-    p.add_argument("--pesos", help="Pesos de YOLO con roles (por defecto, modelo/roles_yolo.pt).")
-    p.set_defaults(func=cmd_comparar)
 
     args = ap.parse_args()
     args.func(args)

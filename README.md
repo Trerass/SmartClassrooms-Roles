@@ -175,7 +175,7 @@ Se ejecutan con `python casos_agente.py`, que deja el detalle completo (herramie
 
 Los cinco casos funcionaron con el modelo `nvidia/nemotron-3.5-super-vl-120b-a12b`. El detalle completo, con los resultados de cada herramienta, está en `vision-service/casos_agente.md`.
 
-**Caso más difícil: una foto real, fuera del dataset.** Se registró como 38-201 una foto de un evento real en EAFIT, que no se incluye en el repositorio porque tiene personas reales, y se preguntó *"¿Cuántas personas hay en el 38-201 y hay alguien de aseo o seguridad?"*.
+**Caso más difícil: una foto real, fuera del dataset.** Se registró como 38-201 una foto de un evento real en EAFIT (`fotos_prueba/eafit_evento.jpg`, publicada con el consentimiento de las personas) y se preguntó *"¿Cuántas personas hay en el 38-201 y hay alguien de aseo o seguridad?"*.
 - El agente llamó a `contar_personas("38-201")` y respondió: *"En el salón 38-201 hay 7 personas, todas estudiantes. No hay personal de aseo ni de seguridad."*
 - **El agente hizo bien su parte:** usó la herramienta adecuada y repitió fielmente su resultado.
 - **La respuesta es incorrecta:**
@@ -183,6 +183,8 @@ Los cinco casos funcionaron con el modelo `nvidia/nemotron-3.5-super-vl-120b-a12
   - La expositora quedó contada como "estudiante", porque el clasificador no tiene una clase para profesores o expositores.
 
 **Limitación observada:** el agente es tan bueno como su herramienta de visión. Como no ve la foto, repite sus errores sin dudar: subconteo por oclusión y roles que no existen en el modelo.
+
+**Segunda limitación observada, el límite de llamadas:** la pregunta *"Compara la ocupación del 38-101, el 38-102 y el 38-201"* necesita unas 7 llamadas (`listar_salones`, más 3 veces `contar_personas` y 3 veces `calcular_ocupacion`). Con el límite de 6, el agente respondió con lo que tenía y lo avisó: *"(Se alcanzó el límite de 6 consultas a herramientas.) … no se pudo calcular su porcentaje oficial por límite de llamadas"*. El límite cumple su función, que es no entrar en bucles, pero corta comparaciones legítimas. Una mejora sería una herramienta `resumen_salones` que devuelva el conteo y la ocupación de todos los salones en una sola llamada.
 
 **Posibles mejoras:**
 1. Que `contar_personas` devuelva también cuántas personas quedaron con baja confianza, para que el agente pueda advertir que el conteo es aproximado.
@@ -234,7 +236,7 @@ El modelo final se midió otra vez con `clasificador_roles.keras` sobre este tes
   - El test es pequeño: con unos 35 recortes por clase, un error cambia el recall en unos 3 puntos. Una validación cruzada (k-fold) daría una estimación más estable.
   - Los datos vienen de internet y no de salones reales, así que el desempeño en un salón real puede ser menor.
   - El conteo completo, con detección más clasificación, no se evaluó en fotos reales contadas a mano.
-  - La alternativa de entrenar YOLOv8m directamente con los tres roles (`etiquetar`, `dividir-yolo` y `comparar` en `roles_salon.py`) quedó implementada pero no se entrenó.
+  - Una alternativa sería entrenar YOLOv8m directamente con los tres roles, para detectar y clasificar en un solo paso. No se hizo.
 
 ## 7. Reproducibilidad
 
@@ -260,6 +262,16 @@ cd frontend && pnpm install && pnpm dev
 ```
 
 En la página, elige un salón, sube la foto, pulsa **Procesar** y pregunta en **Asistente de ocupación**. Debajo de cada respuesta se ven las herramientas usadas, con sus argumentos y resultados.
+
+**Cuaderno explicativo:** `vision-service/explicacion_proyecto.ipynb` explica, con ejemplos que se ejecutan:
+- la arquitectura y las tecnologías;
+- cómo se analiza una imagen (píxeles y convoluciones, con animación);
+- YOLO, con IoU y NMS;
+- EfficientNet, con softmax y umbral;
+- el entrenamiento;
+- el agente, con tool calling y una animación del ciclo.
+
+Se abre con el kernel de `.venv` (`pip install ipykernel` si hace falta).
 
 **Agente por consola**, sin la página:
 
@@ -298,11 +310,12 @@ La documentación completa está en la [wiki](https://github.com/Trerass/SmartCl
 ├── frontend/                  Página React + Vite (subir foto, ver resultados y chat con el agente)
 │   └── src/app/App.tsx
 ├── vision-service/
+│   ├── explicacion_proyecto.ipynb  Cuaderno que explica todo el proyecto con ejemplos y animaciones
 │   ├── agente.py              Agente: herramientas, esquemas, ciclo con límite y uso por consola
 │   ├── casos_agente.py        Corre los 5 casos de prueba del agente
 │   ├── .env.example           Plantilla para la clave del LLM
 │   ├── app.py                 API FastAPI: POST /analizar y POST /preguntar
-│   ├── roles_salon.py         Pipeline completo: descargar, recortar, dividir, entrenar, contar
+│   ├── roles_salon.py         Visión: descargar, recortar, dividir, entrenar y analizar una foto
 │   ├── test_*.py              Pruebas
 │   ├── fotos_prueba/          Fotos de ejemplo
 │   └── data_roles/modelo/     Clasificador entrenado, clases, matrices y curvas

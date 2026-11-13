@@ -3,7 +3,6 @@ import io
 import random
 import sys
 from collections import Counter
-from pathlib import Path
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
@@ -15,11 +14,8 @@ import roles_salon as rs
 sys.modules["keras"] = MagicMock()
 rs.configurar_tf = lambda: None
 rs.get_yolo = lambda pesos: None
-rutas_reales = rs.rutas
-rs.rutas = lambda raiz: {**rutas_reales(raiz), "yolo_roles": Path("no-existe.pt")}
 import app as api  # noqa: E402  (debe importarse con los modelos reemplazados)
 
-rs.rutas = rutas_reales
 client = TestClient(api.app, raise_server_exceptions=False)
 
 
