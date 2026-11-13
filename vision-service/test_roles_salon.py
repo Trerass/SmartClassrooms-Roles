@@ -66,6 +66,19 @@ with tempfile.TemporaryDirectory() as d:
         pass
     assert (P["yolo"] / "data.yaml").exists()
 
+# Con procesadas.txt, una foto nueva se etiqueta aunque haya recortes con nombres no numéricos (seg0110).
+with tempfile.TemporaryDirectory() as d:
+    P = rs.rutas(d)
+    (P["raw"] / "estudiante").mkdir(parents=True)
+    (P["crops"] / "estudiante").mkdir(parents=True)
+    for s in ["0000", "0001", "0002"]:
+        Image.new("RGB", (20, 20)).save(P["raw"] / "estudiante" / f"{s}.jpg")
+    Image.new("RGB", (5, 5)).save(P["crops"] / "estudiante" / "seg0110__p0.jpg")
+    Image.new("RGB", (5, 5)).save(P["crops"] / "estudiante" / "0000__p0.jpg")
+    (P["crops"] / "estudiante" / "procesadas.txt").write_text("0000\n0001\n")  # 0001 descartada, 0002 nueva
+    rs.cmd_etiquetar(Namespace(raiz=d, yolo="x", conf=0.4))
+    assert {f.stem for f in (P["etiquetas"] / "estudiante").glob("*.txt")} == {"0000", "0002"}
+
 # 'recortar --solo-nuevas' no toca lo ya revisado: ni recortes borrados a mano ni otras clases.
 with tempfile.TemporaryDirectory() as d:
     P = rs.rutas(d)

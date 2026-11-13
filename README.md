@@ -1,25 +1,43 @@
-# SmartClassrooms Roles: conteo de personas por rol en un salón
+# SmartClassrooms Roles: agente de ocupación de salones
 
-**Autores:** [Nombre completo 1], [Nombre completo 2]
-**Curso:** [Nombre y código del curso]
-**Fecha:** [Fecha de entrega]
+**Integrantes:** [Nombre completo 1], [Nombre completo 2]
+**Curso:** SI3003 Inteligencia Artificial, Universidad EAFIT
+**Fecha:** 17 de noviembre de 2026
+**Opción elegida:** B, agente con herramientas
 
 ## 1. Introducción
 
 Para gestionar un salón (aforo, asistencia, seguridad) no basta con saber cuántas personas hay: también importa quiénes son. Un estudiante, una persona de aseo y un guardia de seguridad cumplen funciones distintas, pero las cámaras y los contadores comunes solo cuentan "personas", y revisar fotos a mano no escala.
 
-Este proyecto sube una foto de un salón y devuelve cada persona remarcada con su rol (estudiante, aseo o seguridad) y el conteo por rol. Combina un detector preentrenado (YOLOv8m) con un clasificador propio entrenado por transfer learning (EfficientNetB0), y lo expone en una página web.
+Este proyecto es un **agente con herramientas**. Un modelo de lenguaje responde preguntas en español sobre la ocupación de tres salones de EAFIT, llamando a herramientas que consultan los salones, cuentan las personas por rol en la última foto de cada salón y calculan la ocupación. El conteo lo hace un sistema de visión propio: YOLOv8m detecta a cada persona y un clasificador EfficientNetB0, entrenado por transfer learning, decide si es estudiante, persona de aseo o de seguridad.
+
+**Definición del problema:**
+1. **Qué problema y para quién:** la administración de un edificio o el personal de bienestar quieren saber, sin revisar fotos a mano, cuánta gente hay en cada salón, si hay personal de aseo o de seguridad y si se supera la capacidad.
+2. **Qué preguntas atiende:**
+   - ¿Cuántos estudiantes hay en el 38-101?
+   - ¿Hay personal de aseo en el 38-102?
+   - ¿Qué porcentaje de ocupación tiene un salón?
+   - ¿Qué salón está más lleno?
+   - ¿Qué salones tienen foto analizada?
+3. **Por qué un agente y no RAG:** las respuestas no están en documentos. Salen de **datos que cambian** (la última foto de cada salón) y de **cálculos** (la ocupación). Un RAG solo recuperaría texto fijo. El agente decide qué herramienta usar y las encadena: por ejemplo, contar, consultar la capacidad y calcular.
+4. **Fuera del alcance:**
+   - No identifica personas ni guarda fotos: solo cuenta roles.
+   - No hace seguimiento en video ni historial: usa la última foto procesada de cada salón.
+   - No distingue profesores; el clasificador conoce solo tres roles.
+   - Solo cubre tres salones de ejemplo.
 
 ## 2. Objetivo
 
-**General:** detectar a las personas en una foto de un salón y clasificar automáticamente su rol.
+**General:** responder en lenguaje natural preguntas sobre la ocupación y los roles de las personas en un salón, a partir de una foto.
 
 **Específicos:**
-1. Construir un dataset limpio de recortes de personas para tres roles, con al menos 200 recortes por clase.
-2. Entrenar un clasificador de roles con F1 macro ≥ 0,90 en un conjunto de prueba que el modelo nunca vio.
-3. Desplegar el sistema en una página web que, a partir de una foto, muestre a cada persona remarcada con su rol y el conteo por rol.
+1. Entrenar un clasificador de roles (estudiante, aseo, seguridad) con F1 macro ≥ 0,90 en un conjunto de prueba que el modelo nunca vio.
+2. Construir un agente con al menos tres herramientas, que las seleccione y encadene según la pregunta y que tenga un límite de llamadas.
+3. Validar el agente con cinco casos de prueba documentados: tres habituales, uno que exija varias herramientas y uno límite.
 
 ## 3. Descripción de los datos
+
+Los datos son los del **clasificador de roles**, la herramienta de visión del agente. El agente no se entrena: usa un LLM preentrenado.
 
 | | Estudiante | Aseo | Seguridad | Total |
 |---|---|---|---|---|
@@ -45,16 +63,51 @@ Este proyecto sube una foto de un salón y devuelve cada persona remarcada con s
 
 ```mermaid
 flowchart LR
-    A[Búsquedas por rol] --> B[Descarga y<br/>deduplicación]
-    B --> C[YOLOv8m recorta<br/>cada persona]
-    C --> D[Revisión manual<br/>de recortes]
-    D --> E[Partición fija<br/>70/15/15 por foto]
-    E --> F[Fase 1: EfficientNetB0<br/>congelado, se entrena la cabeza]
-    F --> G[Fase 2: fine-tuning<br/>de las últimas capas]
-    G --> H[Evaluación en test<br/>accuracy, F1 macro, matriz]
-    H --> I[API FastAPI +<br/>página React]
+    subgraph V[Herramienta de visión]
+        A[Búsquedas por rol] --> B[Descarga y<br/>deduplicación]
+        B --> C[YOLOv8m recorta<br/>cada persona]
+        C --> D[Revisión manual<br/>de recortes]
+        D --> E[Partición fija<br/>70/15/15 por foto]
+        E --> F[Fase 1: EfficientNetB0<br/>congelado]
+        F --> G[Fase 2: fine-tuning]
+        G --> H[Evaluación en test]
+    end
+    subgraph AG[Agente]
+        I[Foto del salón] --> J[Conteo por rol]
+        K[Pregunta] --> L[LLM elige<br/>herramienta]
+        L --> M[Se ejecuta y<br/>devuelve resultado]
+        M --> L
+        L --> N[Respuesta + pasos]
+    end
+    H --> J
+    J -.-> M
 ```
-*Figura 1. Pipeline desde la obtención de datos hasta el despliegue.*
+*Figura 1. Pipeline: entrenamiento de la herramienta de visión y funcionamiento del agente.*
+
+### 4.1 Agente
+
+| Herramienta | Argumentos | Qué devuelve |
+|---|---|---|
+| `listar_salones` | ninguno | Id, nombre, capacidad y si el salón tiene foto analizada |
+| `contar_personas` | `salon` | Total y conteo por rol de la última foto del salón (estudiante, aseo, seguridad, indeterminado), y la hora del análisis. Si el salón no existe o no tiene foto, devuelve un error explicativo |
+| `calcular_ocupacion` | `personas`, `capacidad` | Porcentaje de ocupación, cupos libres y si se supera la capacidad |
+
+- **Modelo:** `nvidia/nemotron-3.5-super-vl-120b-a12b` en NVIDIA NIM, con `temperature=0` para que las respuestas sean repetibles. Se usa por la API compatible con OpenAI, así que se puede cambiar por otro proveedor con las variables `AGENTE_BASE_URL` y `AGENTE_MODELO`.
+- **Ciclo (`agente.py`, adaptado del loop de Lecture11):**
+  1. El LLM recibe la pregunta y los esquemas de las herramientas.
+  2. Si pide una herramienta, el código la ejecuta y le devuelve el resultado como mensaje `tool`.
+  3. Se repite hasta que responde sin pedir herramientas.
+  4. Los errores de una herramienta (salón inexistente, argumentos inválidos) vuelven al modelo como texto, para que pueda explicarlos.
+- **Límite:** como máximo **6 llamadas a herramientas por pregunta**. Al alcanzarlo, se le quitan las herramientas al modelo, que debe responder con lo que ya obtuvo. La respuesta empieza con "(Se alcanzó el límite de 6 consultas a herramientas.)" y la API devuelve `limite_alcanzado: true`.
+- **Instrucciones del sistema:**
+  - Usar siempre las herramientas y no inventar conteos.
+  - Calcular la ocupación con `calcular_ocupacion` y no a mano.
+  - Decir cuándo falta la foto de un salón.
+  - No asignar rol a las personas "indeterminadas".
+  - Rechazar preguntas fuera del tema.
+- **Privacidad:** el LLM nunca ve la foto. Solo recibe los números que devuelven las herramientas. Al quitar la foto de un salón en la página, también se borra su conteo (`DELETE /analisis/{salon}`), y el agente vuelve a responder que ese salón no tiene foto.
+
+### 4.2 Herramienta de visión
 
 1. **Detección:** YOLOv8m preentrenado en COCO, usando solo la clase `person`. En producción analiza la foto a 960 px: a 640 px se perdían estudiantes del fondo y a 1280 px aparecían personas inexistentes.
 2. **Clasificación:** EfficientNetB0 preentrenado en ImageNet, con una cabeza nueva (pooling, dropout de 0,3 y softmax de 3 clases). Se eligió por su buena precisión con pocos parámetros, lo que lo hace adecuado para un dataset pequeño y para inferencia en CPU.
@@ -72,35 +125,71 @@ flowchart LR
 
 ## 5. Diagrama de interacción
 
-En producción no se guarda ninguna foto: la imagen vive solo en memoria mientras dura la petición.
+En producción no se guarda ninguna foto: la imagen vive solo en memoria mientras dura la petición, y para cada salón solo se conserva el último conteo.
 
 ```mermaid
 sequenceDiagram
     actor U as Usuario
     participant P as Página web (React)
     participant A as API (FastAPI)
-    participant Y as YOLOv8m
-    participant C as Clasificador (EfficientNetB0)
+    participant V as Visión (YOLOv8m + EfficientNetB0)
+    participant L as LLM (NVIDIA NIM)
     U->>P: Elige el salón y sube una foto
-    P->>A: POST /analizar (imagen)
-    A->>A: Valida tamaño (≤ 15 MB) y formato
-    alt Archivo inválido
-        A-->>P: Error 400 / 413
-        P-->>U: Mensaje de error
-    else Imagen válida
-        A->>Y: Detectar personas (960 px)
-        Y-->>A: Cajas de las personas
-        loop Por cada persona
-            A->>C: Recorte 224×224
-            C-->>A: Rol y confianza
-        end
-        A-->>P: Total, conteo por rol, cajas y confianzas
-        P-->>U: Foto con recuadros por rol y conteo
+    P->>A: POST /analizar (foto, salón)
+    A->>V: Detectar y clasificar personas
+    V-->>A: Cajas, roles y confianzas
+    A->>A: Guarda el conteo del salón (sin la foto)
+    A-->>P: Conteo por rol y recuadros
+    P-->>U: Foto con recuadros por rol
+    U->>P: "¿Qué tan lleno está el 38-101?"
+    P->>A: POST /preguntar
+    loop Hasta responder o llegar a 6 herramientas
+        A->>L: Pregunta + esquemas de herramientas + resultados previos
+        L-->>A: Pide contar_personas("38-101")
+        A->>A: Ejecuta la herramienta
     end
+    L-->>A: Respuesta final
+    A-->>P: Respuesta + herramientas llamadas, argumentos y resultados
+    P-->>U: Respuesta y detalle de los pasos
 ```
-*Figura 2. Secuencia de una consulta en producción.*
+*Figura 2. Secuencia de uso: analizar la foto de un salón y preguntar al agente.*
 
 ## 6. Resultados
+
+### 6.1 Casos de prueba del agente
+
+Escenario fijo:
+- **38-101:** `fotos_prueba/salon_aseo.webp`. La visión detecta 16 personas: 15 estudiantes y 1 de aseo.
+- **38-102:** `foto_salon.jpg`. Detecta 5 personas: 4 estudiantes y 1 de aseo.
+- **38-201:** sin foto.
+
+Se ejecutan con `python casos_agente.py`, que deja el detalle completo (herramientas, argumentos, resultados y respuesta) en `vision-service/casos_agente.md`. La evaluación es manual.
+
+| # | Tipo | Pregunta | Resultado esperado | Herramientas llamadas | Respuesta obtenida | Valoración |
+|---|---|---|---|---|---|---|
+| 1 | Habitual | ¿Cuántos estudiantes hay en el 38-101? | `contar_personas("38-101")`, responde 15 | `contar_personas("38-101")` | "En el salón 38-101 hay 15 estudiantes." | ✅ Una sola herramienta, la adecuada. La respuesta coincide con el conteo |
+| 2 | Habitual | ¿Hay personal de aseo en el aula 38-102? | `contar_personas("38-102")`, responde que sí, 1 persona | `listar_salones()` → `contar_personas("38-102")` | "Sí, hay 1 persona de personal de aseo en el aula 38-102." | ✅ Correcta. Interpretó bien "aula 38-102" como el id del salón. Hizo una llamada de más (`listar_salones`), innecesaria pero inofensiva |
+| 3 | Habitual | ¿Qué porcentaje de ocupación tiene el 38-101? | Total 16, capacidad 40, `calcular_ocupacion(16, 40)`, responde 40 % | `listar_salones()` → `contar_personas("38-101")` → `calcular_ocupacion(16, 40)` | "…una ocupación del 40.0% (16 personas de 40 de capacidad). No supera la capacidad y quedan 24 cupos libres." | ✅ Encadenó 3 herramientas: la capacidad salió de `listar_salones` y la cuenta la hizo la herramienta, no el modelo |
+| 4 | Varias herramientas | De los salones con foto analizada, ¿cuál está más lleno respecto a su capacidad? | Cuenta en el 38-101 y en el 38-102, calcula 40 % y 14,3 %, responde que el 38-101 | `listar_salones()` → `contar_personas` ×2 → `calcular_ocupacion` ×2 | "El salón más lleno… es el 38-101, con un 40.0% de ocupación (16 personas de 40). El salón 38-102 tiene solo un 14.3% (5 personas de 35)." | ✅ 5 llamadas, dentro del límite de 6. Ignoró el 38-201 porque `listar_salones` indicaba que no tiene foto |
+| 5 | Límite | ¿Cuántos guardias de seguridad hay en el 38-201? | El salón no tiene foto: debe decirlo sin inventar un número | `listar_salones()` | "El salón 38-201 existe, pero aún no tiene una foto analizada, por lo que no hay datos… es necesario subir y procesar una foto de ese salón." | ✅ No inventó un número y explicó qué falta |
+
+Los cinco casos funcionaron con el modelo `nvidia/nemotron-3.5-super-vl-120b-a12b`. El detalle completo, con los resultados de cada herramienta, está en `vision-service/casos_agente.md`.
+
+**Caso más difícil: una foto real, fuera del dataset.** Se registró como 38-201 una foto de un evento real en EAFIT, que no se incluye en el repositorio porque tiene personas reales, y se preguntó *"¿Cuántas personas hay en el 38-201 y hay alguien de aseo o seguridad?"*.
+- El agente llamó a `contar_personas("38-201")` y respondió: *"En el salón 38-201 hay 7 personas, todas estudiantes. No hay personal de aseo ni de seguridad."*
+- **El agente hizo bien su parte:** usó la herramienta adecuada y repitió fielmente su resultado.
+- **La respuesta es incorrecta:**
+  - A simple vista hay unas 9 personas: YOLO no detectó a dos que estaban tapadas por las de adelante.
+  - La expositora quedó contada como "estudiante", porque el clasificador no tiene una clase para profesores o expositores.
+
+**Limitación observada:** el agente es tan bueno como su herramienta de visión. Como no ve la foto, repite sus errores sin dudar: subconteo por oclusión y roles que no existen en el modelo.
+
+**Posibles mejoras:**
+1. Que `contar_personas` devuelva también cuántas personas quedaron con baja confianza, para que el agente pueda advertir que el conteo es aproximado.
+2. Una cuarta clase "profesor/expositor".
+3. Bajar el umbral de confianza de YOLO solo para personas parcialmente tapadas.
+
+### 6.2 Herramienta de visión
 
 Todos los resultados son del conjunto de test: 111 recortes de fotos que el modelo no vio al entrenar (44 de estudiante, de los cuales 20 son universitarios; 36 de aseo y 31 de seguridad).
 
@@ -148,6 +237,14 @@ Todos los resultados son del conjunto de test: 111 recortes de fotos que el mode
 
 **Requisitos:** Python 3.12, Node 20 o superior y pnpm. La GPU es opcional: el clasificador entrena en CPU en unos 5 minutos.
 
+**Clave del modelo de lenguaje (privada, nunca en el repositorio):** crea una clave gratuita en [build.nvidia.com](https://build.nvidia.com). Empieza por `nvapi-`. Después, en `vision-service`:
+
+```bash
+cp .env.example .env    # y pon tu clave en NVIDIA_API_KEY; .env está en .gitignore
+```
+
+También sirve exportarla como variable de entorno (`export NVIDIA_API_KEY=nvapi-...`). Sin clave, la página y el conteo funcionan igual; solo el asistente responde "Falta la clave del modelo".
+
 ```bash
 # API (la primera vez descarga yolov8m.pt)
 cd vision-service
@@ -157,6 +254,15 @@ uvicorn app:app --port 8000
 
 # Página (otra terminal), luego abrir http://localhost:5173
 cd frontend && pnpm install && pnpm dev
+```
+
+En la página, elige un salón, sube la foto, pulsa **Procesar** y pregunta en **Asistente de ocupación**. Debajo de cada respuesta se ven las herramientas usadas, con sus argumentos y resultados.
+
+**Agente por consola**, sin la página:
+
+```bash
+python agente.py --foto 38-101=fotos_prueba/salon_aseo.webp "¿Qué tan lleno está el 38-101?"
+python casos_agente.py     # los 5 casos de prueba → casos_agente.md
 ```
 
 **Reentrenar el clasificador**, dentro de `vision-service` y con el entorno activado:
@@ -169,15 +275,24 @@ python roles_salon.py dividir        # partición fija 70/15/15
 python roles_salon.py entrenar       # fases 1 y 2, métricas y gráficas en data_roles/modelo/
 ```
 
-**Pruebas:** `python test_roles_salon.py`, `python test_api_errores.py` y `python test_app.py` (este último usa los modelos reales) en `vision-service`, y `pnpm test` en `frontend`. GitHub Actions corre las rápidas en cada push.
+**Pruebas:** en `vision-service`:
+- `python test_agente.py`: el ciclo del agente con un LLM simulado, encadenamiento de herramientas, errores y límite de llamadas. No necesita clave.
+- `python test_roles_salon.py`: el pipeline de datos.
+- `python test_api_errores.py`: la API.
+- `python test_app.py`: usa los modelos reales.
+
+En `frontend`, `pnpm test`. GitHub Actions corre las rápidas en cada push.
 
 **Estructura del repositorio:**
 
 ```text
-├── frontend/                  Página React + Vite (subir foto y ver resultados)
+├── frontend/                  Página React + Vite (subir foto, ver resultados y chat con el agente)
 │   └── src/app/App.tsx
 ├── vision-service/
-│   ├── app.py                 API FastAPI: POST /analizar
+│   ├── agente.py              Agente: herramientas, esquemas, ciclo con límite y uso por consola
+│   ├── casos_agente.py        Corre los 5 casos de prueba del agente
+│   ├── .env.example           Plantilla para la clave del LLM
+│   ├── app.py                 API FastAPI: POST /analizar y POST /preguntar
 │   ├── roles_salon.py         Pipeline completo: descargar, recortar, dividir, entrenar, contar
 │   ├── test_*.py              Pruebas
 │   ├── fotos_prueba/          Fotos de ejemplo

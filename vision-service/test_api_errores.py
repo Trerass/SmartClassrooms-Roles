@@ -99,4 +99,33 @@ for error in (RuntimeError("modelo"), OSError("disco")):
     assert r.status_code == 500, (r.status_code, r.text)
     assert r.json()["detail"] == "No se pudo analizar la foto. Inténtalo de nuevo."
 
+# Con el salón, el conteo queda disponible para el agente (solo números, no la foto).
+api.agente.ANALISIS.clear()
+api.analizar_foto = dos_personas
+r = client.post("/analizar", files={"foto": ("foto.jpg", jpg, "image/jpeg")}, data={"salon": "38-102"})
+assert r.status_code == 200, r.text
+assert api.agente.ANALISIS["38-102"]["total"] == 2
+assert api.agente.ANALISIS["38-102"]["por_rol"]["Aseo"] == 1
+
+# Quitar la foto en la página borra el conteo; repetirlo o hacerlo sin conteo no falla.
+assert client.delete("/analisis/38-102").status_code == 204
+assert "38-102" not in api.agente.ANALISIS
+assert client.delete("/analisis/38-102").status_code == 204
+
+# /preguntar: sin clave, 503 con un mensaje claro; si el LLM falla, 502; pregunta vacía, 400.
+def sin_clave():
+    raise RuntimeError("Falta la clave del modelo.")
+
+
+api.agente.crear_cliente = sin_clave
+r = client.post("/preguntar", json={"pregunta": "¿Cuántos hay?"})
+assert r.status_code == 503 and "clave" in r.json()["detail"], r.text
+api.agente.crear_cliente = lambda: object()
+api.agente.preguntar = lambda pregunta, cliente: (_ for _ in ()).throw(ConnectionError("red"))
+r = client.post("/preguntar", json={"pregunta": "¿Cuántos hay?"})
+assert r.status_code == 502, r.text
+api.agente.preguntar = lambda pregunta, cliente: {"respuesta": "Hay 2.", "pasos": [], "limite_alcanzado": False}
+assert client.post("/preguntar", json={"pregunta": "¿Cuántos hay?"}).json()["respuesta"] == "Hay 2."
+assert client.post("/preguntar", json={"pregunta": "  "}).status_code == 400
+
 print("OK")

@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   test: { environment: 'jsdom' },
   server: {
-    proxy: { '/analizar': 'http://127.0.0.1:8000' },
+    proxy: { '/analizar': 'http://127.0.0.1:8000', '/preguntar': 'http://127.0.0.1:8000', '/analisis': 'http://127.0.0.1:8000' },
   },
 })

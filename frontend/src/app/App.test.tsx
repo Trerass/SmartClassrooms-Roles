@@ -169,3 +169,62 @@ it("cambiar de salón borra el error anterior", () => {
   fireEvent.click(salon(/38-102/));
   expect(estado()).not.toContain("Formato no admitido");
 });
+
+it("el asistente muestra la respuesta y las herramientas que usó", async () => {
+  fetchFalso.mockResolvedValue(
+    respuesta({
+      respuesta: "En el 38-101 hay 1 persona de seguridad.",
+      pasos: [{ herramienta: "contar_personas", argumentos: { salon: "38-101" }, resultado: { total: 17 } }],
+      limite_alcanzado: false,
+    }),
+  );
+  fireEvent.change(screen.getByLabelText("Pregunta para el asistente"), { target: { value: "¿Hay seguridad en el 38-101?" } });
+  fireEvent.click(boton("Preguntar"));
+  expect(await screen.findByText("En el 38-101 hay 1 persona de seguridad.")).toBeTruthy();
+  expect(screen.getByText("1 herramienta usada")).toBeTruthy();
+  expect(screen.getByText('contar_personas({"salon":"38-101"})')).toBeTruthy();
+  const [url, opciones] = fetchFalso.mock.calls[0];
+  expect(url).toBe("/preguntar");
+  expect(JSON.parse(opciones.body)).toEqual({ pregunta: "¿Hay seguridad en el 38-101?" });
+});
+
+it("si el asistente no tiene clave, muestra el motivo", async () => {
+  fetchFalso.mockResolvedValue(respuesta({ detail: "Falta la clave del modelo." }, 503));
+  fireEvent.click(screen.getByRole("button", { name: "¿Qué salones tienen foto analizada?" }));
+  expect(await screen.findByText("Falta la clave del modelo.")).toBeTruthy();
+});
+
+it("procesar envía el salón para que el asistente conozca el conteo", async () => {
+  fetchFalso.mockResolvedValue(respuesta(RESULTADO));
+  elegir();
+  fireEvent.click(boton("Procesar"));
+  await screen.findByText("Estudiante");
+  expect((fetchFalso.mock.calls[0][1].body as FormData).get("salon")).toBe("38-101");
+});
+
+it("quitar una foto procesada borra su conteo del asistente", async () => {
+  await procesado();
+  fetchFalso.mockResolvedValue(new Response(null, { status: 204 }));
+  fireEvent.click(boton("Quitar foto"));
+  const [url, opciones] = fetchFalso.mock.calls.at(-1)!;
+  expect(url).toBe("/analisis/38-101");
+  expect(opciones.method).toBe("DELETE");
+});
+
+it("quitar una foto sin procesar no llama a la API", () => {
+  elegir();
+  fireEvent.click(boton("Quitar foto"));
+  expect(fetchFalso).not.toHaveBeenCalled();
+});
+
+it("mientras el asistente piensa muestra los puntos y no deja enviar otra pregunta", async () => {
+  let responder!: (r: Response) => void;
+  fetchFalso.mockReturnValue(new Promise<Response>((r) => (responder = r)));
+  fireEvent.click(screen.getByRole("button", { name: "¿Qué salón está más lleno?" }));
+  expect(await screen.findByText("El asistente está pensando")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Pregunta para el asistente"), { target: { value: "otra" } });
+  expect((boton("Preguntar") as HTMLButtonElement).disabled).toBe(true);
+  responder(respuesta({ respuesta: "El 38-101.", pasos: [], limite_alcanzado: false }));
+  expect(await screen.findByText("El 38-101.")).toBeTruthy();
+  expect(screen.queryByText("El asistente está pensando")).toBeNull();
+});

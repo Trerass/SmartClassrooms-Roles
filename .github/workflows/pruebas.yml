@@ -21,6 +21,7 @@ jobs:
           pip install -r ligeras.txt
       - run: python test_roles_salon.py
       - run: python test_api_errores.py
+      - run: python test_agente.py
 
   pagina:
     runs-on: ubuntu-latest

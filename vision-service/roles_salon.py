@@ -758,16 +758,21 @@ def cmd_etiquetar(args):
         lab_dir, rev_dir = P["etiquetas"] / name, P["revision"] / name
         lab_dir.mkdir(parents=True, exist_ok=True)
         rev_dir.mkdir(parents=True, exist_ok=True)
-        # Si todos los recortes de una foto ya revisada se borraron, esa foto se descartó a mano.
+        # Una foto que ya pasó por 'recortar' y no tiene recortes se descartó a mano.
         con_recorte = {source_id(f) for f in (P["crops"] / name).glob("*.jpg")}
-        ultima_revisada = max(con_recorte, default="")
+        registro = P["crops"] / name / "procesadas.txt"
+        if registro.exists():
+            procesadas = set(registro.read_text(encoding="utf-8").split())
+        else:  # carpetas anteriores al registro
+            ultima = max((k for k in con_recorte if k.isdigit()), default="")
+            procesadas = {f.stem for f in (P["raw"] / name).glob("*.jpg") if f.stem <= ultima}
         s = dict(nuevas=0, sin_persona=0, ambiguas=0, descartadas=0, ilegibles=0)
 
         for path in sorted((P["raw"] / name).glob("*.jpg")):
             # Es incremental: volver a ejecutarlo no deshace lo que ya se revisó.
             if (lab_dir / f"{path.stem}.txt").exists():
                 continue
-            if path.stem <= ultima_revisada and path.stem not in con_recorte:
+            if path.stem in procesadas and path.stem not in con_recorte:
                 s["descartadas"] += 1
                 continue
             try:

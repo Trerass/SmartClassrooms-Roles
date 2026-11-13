@@ -1,12 +1,14 @@
-"""API que recibe una foto y devuelve las personas contadas por rol y la imagen anotada."""
+"""API: analiza la foto de un salón (personas por rol) y responde preguntas con el agente."""
 import io
 import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from PIL import Image
 
+import agente
 import roles_salon as rs
 
 MAX_BYTES = 15 * 1024 * 1024
@@ -37,7 +39,7 @@ app = FastAPI(title="Roles en salón")
 # async a propósito: la inferencia corre en el event loop, una foto a la vez,
 # porque YOLO no es seguro entre hilos. La foto no se conserva al terminar la petición.
 @app.post("/analizar")
-async def analizar(foto: UploadFile = File(...)):
+async def analizar(foto: UploadFile = File(...), salon: str | None = Form(None)):
     data = await foto.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
         raise HTTPException(413, "La foto supera los 15 MB.")
@@ -52,6 +54,8 @@ async def analizar(foto: UploadFile = File(...)):
     except Exception:
         logging.exception("Falló el análisis de una foto")
         raise HTTPException(500, "No se pudo analizar la foto. Inténtalo de nuevo.")
+    if salon:  # el agente responde con el último conteo de cada salón (solo números, no la foto)
+        agente.registrar_analisis(salon, len(dets), {rs.ROLE_LABELS[r]: n for r, n in conteo.items()})
     # La página dibuja los recuadros sobre la foto original; ancho y alto ya traen la rotación EXIF aplicada.
     return {
         "total": len(dets),
@@ -69,3 +73,29 @@ async def analizar(foto: UploadFile = File(...)):
             for d in sorted(dets, key=lambda d: d["box"][0])
         ],
     }
+
+
+@app.delete("/analisis/{salon}", status_code=204)
+def borrar_analisis(salon: str):
+    """La página llama a esto al quitar la foto de un salón: el agente ya no debe usar ese conteo."""
+    agente.borrar_analisis(salon)
+
+
+class Pregunta(BaseModel):
+    pregunta: str
+
+
+@app.post("/preguntar")
+def preguntar(p: Pregunta):
+    """Agente: responde sobre la ocupación de los salones usando herramientas. Devuelve también los pasos."""
+    if not p.pregunta.strip():
+        raise HTTPException(400, "Escribe una pregunta.")
+    try:
+        cliente = agente.crear_cliente()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    try:
+        return agente.preguntar(p.pregunta[:500], cliente)
+    except Exception:
+        logging.exception("Falló el agente")
+        raise HTTPException(502, "El modelo de lenguaje no respondió. Revisa la clave o inténtalo de nuevo.")
