@@ -6,3 +6,5 @@ __pycache__
 !vision-service/data_roles/modelo/roles_yolo.pt
 vision-service/data_roles/*
 !vision-service/data_roles/modelo
+!vision-service/data_roles/solo_train.txt
+vision-service/data_roles/modelo/pesos_base_congelada.weights.h5

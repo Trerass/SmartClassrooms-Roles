@@ -1,0 +1,11 @@
+# Fotos que van siempre a train (una por línea, clase/foto): salones reales y fotos elegidas a mano
+# para corregir errores concretos. No inflan la nota: simplemente no se usan en el test.
+estudiante/0133
+estudiante/0384
+persona_seguridad/0310
+persona_seguridad/0311
+persona_seguridad/0312
+persona_seguridad/0313
+persona_seguridad/0314
+persona_seguridad/0315
+persona_seguridad/0316
