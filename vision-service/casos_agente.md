@@ -4,8 +4,8 @@ Modelo: `nvidia/nemotron-3.5-super-vl-120b-a12b`
 
 Conteos registrados antes de preguntar:
 
-- **38-101**: {"total": 16, "por_rol": {"Estudiante": 15, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}
-- **38-102**: {"total": 5, "por_rol": {"Estudiante": 4, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}
+- **38-101**: {"total": 16, "por_rol": {"Estudiante": 15, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "22:19"}
+- **38-102**: {"total": 5, "por_rol": {"Estudiante": 4, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "22:19"}
 - **38-201**: sin foto
 
 ## Caso 1 (Habitual)
@@ -16,11 +16,11 @@ Conteos registrados antes de preguntar:
 
 **Herramientas llamadas:**
 
-1. `contar_personas({"salon": "38-101"})` → `{"salon": "38-101", "total": 16, "por_rol": {"Estudiante": 15, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}`
+1. `contar_personas({"salon": "38-101"})` → `{"salon": "38-101", "total": 16, "por_rol": {"Estudiante": 15, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "22:19"}`
 
-**Respuesta:** En el salón 38-101 hay **15 estudiantes**.
+**Respuesta:** Hay 15 estudiantes en el salón 38-101.
 
-**Valoración:** ✅ Una sola herramienta, la adecuada; la respuesta coincide con el conteo.
+**Valoración:** ✅ Una sola herramienta, la adecuada; la respuesta coincide con el conteo (15 estudiantes).
 
 ## Caso 2 (Habitual)
 
@@ -30,46 +30,41 @@ Conteos registrados antes de preguntar:
 
 **Herramientas llamadas:**
 
-1. `listar_salones({})` → `{"salones": [{"id": "38-101", "nombre": "Aula 38-101", "capacidad": 40, "tiene_foto_analizada": true}, {"id": "38-102", "nombre": "Aula 38-102", "capacidad": 35, "tiene_foto_analizada": true}, {"id": "38-201", "nombre": "Aula 38-201", "capacidad": 45, "tiene_foto_analizada": false}]}`
-2. `contar_personas({"salon": "38-102"})` → `{"salon": "38-102", "total": 5, "por_rol": {"Estudiante": 4, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}`
+1. `contar_personas({"salon": "38-102"})` → `{"salon": "38-102", "total": 5, "por_rol": {"Estudiante": 4, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "22:19"}`
 
-**Respuesta:** Sí, hay 1 persona de personal de aseo en el aula 38-102.
+**Respuesta:** Sí, hay una persona con rol de personal de aseo en el aula 38-102.
 
-**Valoración:** ✅ Correcta. Llamó a listar_salones de más, sin efecto en la respuesta.
+**Valoración:** ✅ Correcta, con una sola herramienta. Interpretó "aula 38-102" como el id del salón.
 
 ## Caso 3 (Habitual)
 
 **Pregunta:** ¿Qué porcentaje de ocupación tiene el 38-101?
 
-**Esperado:** Obtiene el total (contar_personas) y la capacidad (listar_salones) y llama a calcular_ocupacion.
+**Esperado:** Llama a calcular_ocupacion('38-101'), que toma el conteo y la capacidad, y responde 40 %.
 
 **Herramientas llamadas:**
 
-1. `listar_salones({})` → `{"salones": [{"id": "38-101", "nombre": "Aula 38-101", "capacidad": 40, "tiene_foto_analizada": true}, {"id": "38-102", "nombre": "Aula 38-102", "capacidad": 35, "tiene_foto_analizada": true}, {"id": "38-201", "nombre": "Aula 38-201", "capacidad": 45, "tiene_foto_analizada": false}]}`
-2. `contar_personas({"salon": "38-101"})` → `{"salon": "38-101", "total": 16, "por_rol": {"Estudiante": 15, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}`
-3. `calcular_ocupacion({"personas": 16, "capacidad": 40})` → `{"personas": 16, "capacidad": 40, "ocupacion_pct": 40.0, "supera_capacidad": false, "cupos_libres": 24}`
+1. `calcular_ocupacion({"salon": "38-101"})` → `{"salon": "38-101", "personas": 16, "capacidad": 40, "ocupacion_pct": 40.0, "supera_capacidad": false, "cupos_libres": 24}`
 
-**Respuesta:** El salón 38-101 tiene una ocupación del 40.0% (16 personas de 40 de capacidad). No supera la capacidad y quedan 24 cupos libres.
+**Respuesta:** El salón 38-101 tiene una ocupación del 40 por ciento. Hay 16 personas de una capacidad de 40, con 24 cupos libres y no supera su capacidad.
 
-**Valoración:** ✅ Encadenó las 3 herramientas y no hizo la cuenta por su cuenta.
+**Valoración:** ✅ Una sola llamada: la herramienta tomó el conteo y la capacidad, y el modelo no hizo la cuenta ni pasó números.
 
 ## Caso 4 (Varias herramientas)
 
 **Pregunta:** De los salones con foto analizada, ¿cuál está más lleno respecto a su capacidad?
 
-**Esperado:** Consulta los salones, cuenta en cada uno con foto, calcula la ocupación de cada uno y los compara.
+**Esperado:** Calcula la ocupación de cada salón con foto (calcular_ocupacion) y los compara: el 38-101.
 
 **Herramientas llamadas:**
 
 1. `listar_salones({})` → `{"salones": [{"id": "38-101", "nombre": "Aula 38-101", "capacidad": 40, "tiene_foto_analizada": true}, {"id": "38-102", "nombre": "Aula 38-102", "capacidad": 35, "tiene_foto_analizada": true}, {"id": "38-201", "nombre": "Aula 38-201", "capacidad": 45, "tiene_foto_analizada": false}]}`
-2. `contar_personas({"salon": "38-101"})` → `{"salon": "38-101", "total": 16, "por_rol": {"Estudiante": 15, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}`
-3. `contar_personas({"salon": "38-102"})` → `{"salon": "38-102", "total": 5, "por_rol": {"Estudiante": 4, "Aseo": 1, "Seguridad": 0, "Indeterminado": 0}, "hora_analisis": "19:27"}`
-4. `calcular_ocupacion({"personas": 16, "capacidad": 40})` → `{"personas": 16, "capacidad": 40, "ocupacion_pct": 40.0, "supera_capacidad": false, "cupos_libres": 24}`
-5. `calcular_ocupacion({"personas": 5, "capacidad": 35})` → `{"personas": 5, "capacidad": 35, "ocupacion_pct": 14.3, "supera_capacidad": false, "cupos_libres": 30}`
+2. `calcular_ocupacion({"salon": "38-101"})` → `{"salon": "38-101", "personas": 16, "capacidad": 40, "ocupacion_pct": 40.0, "supera_capacidad": false, "cupos_libres": 24}`
+3. `calcular_ocupacion({"salon": "38-102"})` → `{"salon": "38-102", "personas": 5, "capacidad": 35, "ocupacion_pct": 14.3, "supera_capacidad": false, "cupos_libres": 30}`
 
-**Respuesta:** El salón más lleno respecto a su capacidad es el **38-101 (Aula 38-101)**, con un **40.0% de ocupación** (16 personas de 40). El salón 38-102 tiene solo un 14.3% (5 personas de 35).
+**Respuesta:** El salón más lleno respecto a su capacidad es el 38-101, con un 40 por ciento de ocupación. El salón 38-102 tiene un 14.3 por ciento.
 
-**Valoración:** ✅ 5 llamadas (límite 6). Comparó bien e ignoró el salón sin foto.
+**Valoración:** ✅ 3 llamadas (antes eran 5). Usó listar_salones para saber qué salones tienen foto, comparó bien e ignoró el 38-201.
 
 ## Caso 5 (Límite)
 
@@ -79,9 +74,9 @@ Conteos registrados antes de preguntar:
 
 **Herramientas llamadas:**
 
-1. `listar_salones({})` → `{"salones": [{"id": "38-101", "nombre": "Aula 38-101", "capacidad": 40, "tiene_foto_analizada": true}, {"id": "38-102", "nombre": "Aula 38-102", "capacidad": 35, "tiene_foto_analizada": true}, {"id": "38-201", "nombre": "Aula 38-201", "capacidad": 45, "tiene_foto_analizada": false}]}`
+1. `contar_personas({"salon": "38-201"})` → `{"error": "El salón 38-201 no tiene ninguna foto analizada. Hay que subir y procesar una foto en la página."}`
 
-**Respuesta:** El salón 38-201 existe, pero aún no tiene una foto analizada, por lo que no hay datos de cuántas personas hay ni de sus roles. Para poder responder, es necesario subir y procesar una foto de ese salón.
+**Respuesta:** El salón 38-201 no tiene ninguna foto analizada todavía, por lo que no puedo decirte cuántos guardias de seguridad hay. Falta subir y procesar una foto en la página para obtener esa información.
 
-**Valoración:** ✅ No inventó un número y explicó que falta la foto.
+**Valoración:** ✅ No inventó un número y explicó que falta subir y procesar la foto.
 

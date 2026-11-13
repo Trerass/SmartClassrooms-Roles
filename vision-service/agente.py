@@ -73,15 +73,13 @@ def contar_personas(salon: str) -> dict:
     return {"salon": s, **ANALISIS[s]}
 
 
-def calcular_ocupacion(personas: int, capacidad: int) -> dict:
-    """Porcentaje de ocupación y si se supera la capacidad."""
-    try:
-        personas, capacidad = int(personas), int(capacidad)
-    except (TypeError, ValueError):
-        return {"error": "personas y capacidad deben ser números enteros."}
-    if capacidad <= 0 or personas < 0:
-        return {"error": "La capacidad debe ser mayor que 0 y las personas no pueden ser negativas."}
-    return {"personas": personas, "capacidad": capacidad,
+def calcular_ocupacion(salon: str) -> dict:
+    """Ocupación del salón con su último conteo y su capacidad. El modelo no pasa números: no puede equivocarlos."""
+    conteo = contar_personas(salon)
+    if "error" in conteo:
+        return conteo
+    personas, capacidad = conteo["total"], SALONES[conteo["salon"]]["capacidad"]
+    return {"salon": conteo["salon"], "personas": personas, "capacidad": capacidad,
             "ocupacion_pct": round(100 * personas / capacidad, 1),
             "supera_capacidad": personas > capacidad,
             "cupos_libres": max(capacidad - personas, 0)}
@@ -104,11 +102,12 @@ ESQUEMAS = [
             "required": ["salon"]}}},
     {"type": "function", "function": {
         "name": "calcular_ocupacion",
-        "description": "Calcula el porcentaje de ocupación, los cupos libres y si se supera la capacidad.",
+        "description": "Calcula la ocupación de un salón con su última foto analizada y su capacidad: "
+                       "personas, capacidad, porcentaje, cupos libres y si se supera la capacidad. "
+                       "No hace falta llamar antes a contar_personas ni a listar_salones.",
         "parameters": {"type": "object", "properties": {
-            "personas": {"type": "integer", "description": "Número de personas en el salón."},
-            "capacidad": {"type": "integer", "description": "Capacidad máxima del salón."}},
-            "required": ["personas", "capacidad"]}}},
+            "salon": {"type": "string", "description": "Id del salón, por ejemplo '38-101'."}},
+            "required": ["salon"]}}},
 ]
 
 

@@ -20,9 +20,9 @@ CASOS = [
     ("Habitual", "¿Hay personal de aseo en el aula 38-102?",
      "Llama a contar_personas('38-102') y responde que sí, con cuántas personas de aseo."),
     ("Habitual", "¿Qué porcentaje de ocupación tiene el 38-101?",
-     "Obtiene el total (contar_personas) y la capacidad (listar_salones) y llama a calcular_ocupacion."),
+     "Llama a calcular_ocupacion('38-101'), que toma el conteo y la capacidad, y responde 40 %."),
     ("Varias herramientas", "De los salones con foto analizada, ¿cuál está más lleno respecto a su capacidad?",
-     "Consulta los salones, cuenta en cada uno con foto, calcula la ocupación de cada uno y los compara."),
+     "Calcula la ocupación de cada salón con foto (calcular_ocupacion) y los compara: el 38-101."),
     ("Límite", "¿Cuántos guardias de seguridad hay en el 38-201?",
      "El 38-201 no tiene foto: debe decir que no hay datos y que hay que subir una foto, sin inventar un número."),
 ]

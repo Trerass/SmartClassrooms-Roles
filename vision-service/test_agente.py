@@ -36,16 +36,21 @@ assert "salón inventado" not in agente.ANALISIS and len(agente.ANALISIS) == 1
 assert agente.contar_personas("Aula 38-101")["total"] == 17  # acepta el nombre además del id
 assert "no existe" in agente.contar_personas("38-999")["error"]
 assert "no tiene ninguna foto" in agente.contar_personas("38-102")["error"]
-assert agente.calcular_ocupacion(50, 40) == {"personas": 50, "capacidad": 40, "ocupacion_pct": 125.0,
-                                             "supera_capacidad": True, "cupos_libres": 0}
-assert "error" in agente.calcular_ocupacion(5, 0)
+assert agente.calcular_ocupacion("Aula 38-101") == {"salon": "38-101", "personas": 17, "capacidad": 40,
+                                                    "ocupacion_pct": 42.5, "supera_capacidad": False,
+                                                    "cupos_libres": 23}  # capacidad tomada de SALONES
+assert "no tiene ninguna foto" in agente.calcular_ocupacion("38-102")["error"]
+assert "no existe" in agente.calcular_ocupacion("38-999")["error"]
+agente.registrar_analisis("38-201", 50, {"Estudiante": 50})
+assert agente.calcular_ocupacion("38-201")["supera_capacidad"] and agente.calcular_ocupacion("38-201")["cupos_libres"] == 0
+agente.borrar_analisis("38-201")
 assert [s["tiene_foto_analizada"] for s in agente.listar_salones()["salones"]] == [True, False, False]
 assert "no existe" in agente.ejecutar_herramienta("borrar_todo", "{}")["error"]
 assert "inválidos" in agente.ejecutar_herramienta("contar_personas", "{no es json")["error"]
 
 # Ciclo: encadena herramientas y el resultado de cada una vuelve al modelo.
 llm = LLMFalso([llamada("contar_personas", salon="38-101")],
-               [llamada("calcular_ocupacion", personas=17, capacidad=40)],
+               [llamada("calcular_ocupacion", salon="38-101")],
                "El 38-101 tiene 17 personas, un 42,5 % de su capacidad.")
 r = agente.preguntar("¿Qué tan lleno está el 38-101?", llm)
 assert [p["herramienta"] for p in r["pasos"]] == ["contar_personas", "calcular_ocupacion"]
